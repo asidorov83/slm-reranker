@@ -1,0 +1,6 @@
+{
+  "name": "NanoRank AI",
+  "description": "On-device personalization and ranking engine styled with the Sleek Interface theme.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
