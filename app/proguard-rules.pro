@@ -1,21 +1,35 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Jetpack Compose rules
+-keepclassmembers class * extends androidx.compose.ui.node.Owner { *; }
+-keep class androidx.compose.ui.platform.AndroidComposeView { *; }
+-keepclassmembers class * {
+    @androidx.compose.runtime.Composable *;
+}
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Keep main entry points
+-keep class com.example.MainActivity { *; }
+-keep class com.example.** { *; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Serialization and Moshi
+-keepclassmembers class * {
+    @com.squareup.moshi.Json *;
+}
+-dontwarn com.squareup.moshi.**
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Retrofit
+-dontwarn retrofit2.**
+-keep class retrofit2.** { *; }
+-keepattributes Signature, InnerClasses, EnclosingMethod
+
+# OkHttp
+-dontwarn okhttp3.**
+-keep class okhttp3.** { *; }
+
+# Room
+-dontwarn androidx.room.**
+-keep class * extends androidx.room.RoomDatabase { *; }
+
+# General Kotlin and Coroutines
+-keepclassmembers class * extends kotlin.coroutines.jvm.internal.ContinuationImpl { *; }
+-dontwarn kotlinx.coroutines.**
+-keep class kotlinx.coroutines.** { *; }
+
