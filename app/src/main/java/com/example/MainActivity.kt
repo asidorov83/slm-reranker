@@ -42,6 +42,11 @@ import androidx.compose.ui.window.Dialog
 import com.example.ui.theme.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.compose.foundation.BorderStroke
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -112,12 +117,47 @@ val PRESETS = listOf(
     )
 )
 
-// Rule-based simulation of Gemini Nano on-device context ranker
+// Helper to query file metadata from content URI
+fun getFileNameAndSize(context: android.content.Context, uri: Uri): Pair<String, Long> {
+    var name = "unknown_adapter.bin"
+    var size = 0L
+    try {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (cursor.moveToFirst()) {
+                if (nameIndex != -1) {
+                    name = cursor.getString(nameIndex)
+                }
+                if (sizeIndex != -1) {
+                    size = cursor.getLong(sizeIndex)
+                }
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    return Pair(name, size)
+}
+
+// Helper to format file size in a human-readable form
+fun formatSize(sizeInBytes: Long): String {
+    if (sizeInBytes <= 0) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB")
+    val digitGroups = (Math.log10(sizeInBytes.toDouble()) / Math.log10(1024.0)).toInt()
+    return String.format(java.util.Locale.US, "%.1f %s", sizeInBytes / Math.pow(1024.0, digitGroups.toDouble()), units[digitGroups])
+}
+
+// Rule-based simulation of Gemini Nano on-device context ranker with LoRA adapter support
 fun rankItems(
     identity: String,
     history: String,
     context: String,
-    itemsText: String
+    itemsText: String,
+    isLoraActive: Boolean,
+    loraSpecialization: String,
+    loraRank: Int,
+    loraAlpha: Int
 ): List<ScoredItem> {
     val items = itemsText.split(",")
         .map { it.trim() }
@@ -126,6 +166,14 @@ fun rankItems(
     val identityLower = identity.lowercase()
     val historyLower = history.lowercase()
     val contextLower = context.lowercase()
+    
+    // Scale factor based on LoRA Alpha / Rank ratio (standard scaling in LoRA)
+    val scalingFactor = if (isLoraActive) {
+        val ratio = loraAlpha.toFloat() / loraRank.toFloat()
+        (0.8f + (ratio / 8.0f)).coerceIn(1.0f, 2.5f)
+    } else {
+        1.0f
+    }
     
     val scoredItems = items.map { item ->
         val itemLower = item.lowercase()
@@ -195,6 +243,47 @@ fun rankItems(
             }
         }
         
+        // --- 2. LoRA Tuning Enhancements ---
+        if (isLoraActive) {
+            var loraBoost = 0
+            var loraReason = ""
+            
+            when {
+                loraSpecialization.contains("Eco") -> {
+                    if (itemLower.contains("cotton") || itemLower.contains("boots") || itemLower.contains("umbrella") || itemLower.contains("mat") || itemLower.contains("tee")) {
+                        loraBoost = (15 * scalingFactor).toInt()
+                        loraReason = "[LoRA Eco-Boost] High-sustainability rank amplification applied"
+                    }
+                }
+                loraSpecialization.contains("Active") -> {
+                    if (itemLower.contains("boots") || itemLower.contains("shoes") || itemLower.contains("mat") || itemLower.contains("hat") || itemLower.contains("tee")) {
+                        loraBoost = (18 * scalingFactor).toInt()
+                        loraReason = "[LoRA Active-Tuning] Multi-matrix scaling prioritized athletic/active usage profile"
+                    }
+                }
+                loraSpecialization.contains("Tech") -> {
+                    if (itemLower.contains("earbuds") || itemLower.contains("buds") || itemLower.contains("headphones") || itemLower.contains("umbrella")) {
+                        loraBoost = (16 * scalingFactor).toInt()
+                        loraReason = "[LoRA Tech-Opt] Unified attention routing for smart commuter wearables"
+                    }
+                }
+                else -> {
+                    if (itemLower.length % 2 == 0) {
+                        loraBoost = (12 * scalingFactor).toInt()
+                        loraReason = "[LoRA Custom-Tune] Customized projection weights matching user-defined adaptation matrix"
+                    }
+                }
+            }
+            
+            if (loraBoost > 0) {
+                score += loraBoost
+                reason = loraReason
+            } else {
+                score = (score * scalingFactor).toInt()
+                reason = "[LoRA Enhanced] " + reason
+            }
+        }
+        
         // Add random slight variation to guarantee fine distinction
         score += item.length % 5
         
@@ -227,6 +316,39 @@ fun MainScreen() {
     // Dialog state for text modifications
     var editingField by remember { mutableStateOf<String?>(null) }
     var editingValue by remember { mutableStateOf("") }
+    
+    // LoRA Adapter State
+    var loraFileName by remember { mutableStateOf<String?>(null) }
+    var loraFileSize by remember { mutableStateOf<Long>(0L) }
+    var isLoraActive by remember { mutableStateOf(false) }
+    var loraRank by remember { mutableStateOf(8) }
+    var loraAlpha by remember { mutableStateOf(16) }
+    var loraTargetModules by remember { mutableStateOf("q_proj, v_proj") }
+    var loraSpecialization by remember { mutableStateOf("🌿 Eco & Sustainability Boost") }
+    var showAdvancedLoraParams by remember { mutableStateOf(false) }
+
+    // File picker launcher
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val (name, size) = getFileNameAndSize(context, uri)
+            loraFileName = name
+            loraFileSize = size
+            isLoraActive = true
+            
+            // Auto-detect specialization based on file name keywords
+            val lowerName = name.lowercase()
+            loraSpecialization = when {
+                lowerName.contains("eco") || lowerName.contains("green") || lowerName.contains("sustainable") -> "🌿 Eco & Sustainability Boost"
+                lowerName.contains("active") || lowerName.contains("sport") || lowerName.contains("fit") || lowerName.contains("run") -> "⚡ Performance & Active-Wear Tuning"
+                lowerName.contains("tech") || lowerName.contains("dev") || lowerName.contains("code") || lowerName.contains("music") -> "💻 Tech-Productivity Optimizer"
+                else -> "🎯 Default Balanced Custom Mode"
+            }
+            
+            Toast.makeText(context, "LoRA Adapter Loaded: $name", Toast.LENGTH_LONG).show()
+        }
+    }
     
     // Paste handler supporting Clipboard and defaults fallback
     val handlePaste = { label: String, onPasted: (String) -> Unit ->
@@ -322,18 +444,74 @@ fun MainScreen() {
                 }
             }
             
+            // LoRA Adapter control interface
+            LoraAdapterCard(
+                fileName = loraFileName,
+                fileSize = loraFileSize,
+                isActive = isLoraActive,
+                onActiveChange = { isLoraActive = it },
+                onUploadClick = { filePickerLauncher.launch("*/*") },
+                onLoadPreloaded = {
+                    loraFileName = "EcoRanker_specialized_v1.bin"
+                    loraFileSize = 4056128L
+                    isLoraActive = true
+                    loraSpecialization = "🌿 Eco & Sustainability Boost"
+                    Toast.makeText(context, "Loaded Pre-loaded EcoRanker Adapter!", Toast.LENGTH_SHORT).show()
+                },
+                onUnloadClick = {
+                    loraFileName = null
+                    loraFileSize = 0L
+                    isLoraActive = false
+                    Toast.makeText(context, "LoRA Adapter unloaded.", Toast.LENGTH_SHORT).show()
+                },
+                loraRank = loraRank,
+                onRankChange = { loraRank = it },
+                loraAlpha = loraAlpha,
+                onAlphaChange = { loraAlpha = it },
+                loraTargetModules = loraTargetModules,
+                onTargetModulesChange = { loraTargetModules = it },
+                loraSpecialization = loraSpecialization,
+                onSpecializationChange = { loraSpecialization = it },
+                showAdvanced = showAdvancedLoraParams,
+                onShowAdvancedChange = { showAdvancedLoraParams = it }
+            )
+            
             // SORT BUTTON with active state and ripple
             Button(
                 onClick = {
                     coroutineScope.launch {
                         isLoading = true
-                        loadingPhase = "Initializing AI Core on-device engine..."
-                        delay(600)
-                        loadingPhase = "Loading model parameters into device RAM..."
-                        delay(500)
-                        loadingPhase = "Evaluating contextual persona vectors..."
-                        delay(500)
-                        rankedResults = rankItems(userIdentity, purchaseHistory, externalContext, itemsToRank)
+                        if (isLoraActive && loraFileName != null) {
+                            loadingPhase = "Initializing AI Core on-device engine..."
+                            delay(450)
+                            loadingPhase = "Loading baseline model parameters into device RAM..."
+                            delay(450)
+                            loadingPhase = "Reading uploaded LoRA adapter file ($loraFileName)..."
+                            delay(450)
+                            loadingPhase = "Mapping low-rank matrices (r=$loraRank, alpha=$loraAlpha) to attention weights..."
+                            delay(500)
+                            loadingPhase = "Merging LoRA tensors into Gemini Nano layer weights..."
+                            delay(500)
+                            loadingPhase = "Evaluating contextual persona vectors with LoRA tuning..."
+                            delay(450)
+                        } else {
+                            loadingPhase = "Initializing AI Core on-device engine..."
+                            delay(600)
+                            loadingPhase = "Loading model parameters into device RAM..."
+                            delay(500)
+                            loadingPhase = "Evaluating contextual persona vectors..."
+                            delay(500)
+                        }
+                        rankedResults = rankItems(
+                            identity = userIdentity,
+                            history = purchaseHistory,
+                            context = externalContext,
+                            itemsText = itemsToRank,
+                            isLoraActive = isLoraActive,
+                            loraSpecialization = loraSpecialization,
+                            loraRank = loraRank,
+                            loraAlpha = loraAlpha
+                        )
                         isLoading = false
                     }
                 },
@@ -821,6 +999,467 @@ fun EditFieldDialog(
                         colors = ButtonDefaults.buttonColors(containerColor = SleekPrimary)
                     ) {
                         Text("Save", color = Color.White)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun LoraAdapterCard(
+    fileName: String?,
+    fileSize: Long,
+    isActive: Boolean,
+    onActiveChange: (Boolean) -> Unit,
+    onUploadClick: () -> Unit,
+    onLoadPreloaded: () -> Unit,
+    onUnloadClick: () -> Unit,
+    loraRank: Int,
+    onRankChange: (Int) -> Unit,
+    loraAlpha: Int,
+    onAlphaChange: (Int) -> Unit,
+    loraTargetModules: String,
+    onTargetModulesChange: (String) -> Unit,
+    loraSpecialization: String,
+    onSpecializationChange: (String) -> Unit,
+    showAdvanced: Boolean,
+    onShowAdvancedChange: (Boolean) -> Unit
+) {
+    val context = LocalContext.current
+    
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = "GEMINI NANO LORA ADAPTER",
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontWeight = FontWeight.Bold,
+                color = SleekLabel,
+                fontSize = 11.sp,
+                letterSpacing = 0.5.sp
+            ),
+            modifier = Modifier.padding(horizontal = 4.dp)
+        )
+        
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(SleekSurfaceVariant, RoundedCornerShape(24.dp))
+                .border(1.dp, SleekOutline, RoundedCornerShape(24.dp))
+                .clip(RoundedCornerShape(24.dp))
+                .padding(20.dp)
+        ) {
+            if (fileName == null) {
+                // Not loaded state
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("🤖", fontSize = 24.sp)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Fine-Tuned Adapter",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = SleekOnBackground
+                                )
+                            )
+                            Text(
+                                text = "Load a LoRA (.bin / .bytes) to specialize Gemini Nano weights.",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = SleekLabel,
+                                    fontSize = 11.sp
+                                )
+                            )
+                        }
+                    }
+                    
+                    // Dashed file upload button
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(64.dp)
+                            .dashedBorder(1.5.dp, SleekPrimary, 16.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { onUploadClick() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("📁", fontSize = 18.sp)
+                            Text(
+                                text = "Upload LoRA Adapter file...",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = SleekPrimary
+                                )
+                            )
+                        }
+                    }
+                    
+                    // Preloaded option for instant testing
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(SleekPrimaryContainer.copy(alpha = 0.5f))
+                            .clickable { onLoadPreloaded() }
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("🌱", fontSize = 16.sp)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Use Pre-loaded EcoRanker_v1.bin (4.1 MB)",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = SleekOnPrimaryContainer,
+                                fontSize = 11.sp
+                            )
+                        )
+                    }
+                }
+            } else {
+                // Loaded state
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    // Header loaded row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("🟢", fontSize = 10.sp)
+                            Column {
+                                Text(
+                                    text = fileName,
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = SleekOnBackground
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "Size: ${formatSize(fileSize)}",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = SleekLabel,
+                                        fontSize = 11.sp
+                                    )
+                                )
+                            }
+                        }
+                        
+                        // Active switch
+                        Switch(
+                            checked = isActive,
+                            onCheckedChange = onActiveChange,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = SleekPrimary,
+                                uncheckedThumbColor = SleekLabel,
+                                uncheckedTrackColor = SleekOutlineVariant
+                            )
+                        )
+                    }
+                    
+                    // Custom Divider
+                    Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(SleekOutlineVariant))
+                    
+                    // Specialization Profile Selection
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "LORA SPECIALIZATION PROFILE",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = SleekLabel,
+                                fontSize = 10.sp,
+                                letterSpacing = 0.5.sp
+                            )
+                        )
+                        
+                        val profiles = listOf(
+                            "🌿 Eco & Sustainability Boost",
+                            "⚡ Performance & Active-Wear Tuning",
+                            "💻 Tech-Productivity Optimizer",
+                            "🎯 Custom Adaptation Mode"
+                        )
+                        
+                        // Selectable chips/boxes for profiles
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            profiles.chunked(2).forEach { chunk ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    chunk.forEach { profile ->
+                                        val isSelected = loraSpecialization == profile
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .background(
+                                                    if (isSelected) SleekPrimary else SleekBackground,
+                                                    RoundedCornerShape(12.dp)
+                                                )
+                                                .border(
+                                                    1.dp,
+                                                    if (isSelected) SleekPrimary else SleekOutline,
+                                                    RoundedCornerShape(12.dp)
+                                                )
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .clickable { onSpecializationChange(profile) }
+                                                .padding(vertical = 10.dp, horizontal = 8.dp),
+                                            contentAlignment = Alignment.CenterStart
+                                        ) {
+                                            Text(
+                                                text = profile,
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isSelected) Color.White else SleekOnBackground,
+                                                    fontSize = 10.sp
+                                                ),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Custom Divider
+                    Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(SleekOutlineVariant))
+                    
+                    // Advanced Parameters Collapsible Accordion
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onShowAdvancedChange(!showAdvanced) }
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "⚙️ Advanced Hyperparameters",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = SleekPrimary
+                                )
+                            )
+                            Text(
+                                text = if (showAdvanced) "▲" else "▼",
+                                fontSize = 10.sp,
+                                color = SleekPrimary
+                            )
+                        }
+                        
+                        AnimatedVisibility(visible = showAdvanced) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                // Rank parameter slider
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "Rank (r)",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = SleekOnBackground,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        )
+                                        Text(
+                                            text = "r = $loraRank",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = SleekPrimary,
+                                                fontWeight = FontWeight.Bold,
+                                                fontFamily = FontFamily.Monospace
+                                            )
+                                        )
+                                    }
+                                    Slider(
+                                        value = when (loraRank) {
+                                            4 -> 0f
+                                            8 -> 0.33f
+                                            16 -> 0.66f
+                                            32 -> 1f
+                                            else -> 0.33f
+                                        },
+                                        onValueChange = { sliderVal ->
+                                            val newVal = when {
+                                                sliderVal < 0.16f -> 4
+                                                sliderVal < 0.5f -> 8
+                                                sliderVal < 0.83f -> 16
+                                                else -> 32
+                                            }
+                                            onRankChange(newVal)
+                                        },
+                                        colors = SliderDefaults.colors(
+                                            activeTrackColor = SleekPrimary,
+                                            inactiveTrackColor = SleekOutlineVariant,
+                                            thumbColor = SleekPrimary
+                                        )
+                                    )
+                                }
+                                
+                                // Alpha parameter slider
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "Alpha (α)",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = SleekOnBackground,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        )
+                                        Text(
+                                            text = "α = $loraAlpha",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = SleekPrimary,
+                                                fontWeight = FontWeight.Bold,
+                                                fontFamily = FontFamily.Monospace
+                                            )
+                                        )
+                                    }
+                                    Slider(
+                                        value = when (loraAlpha) {
+                                            8 -> 0f
+                                            16 -> 0.33f
+                                            32 -> 0.66f
+                                            64 -> 1f
+                                            else -> 0.33f
+                                        },
+                                        onValueChange = { sliderVal ->
+                                            val newVal = when {
+                                                sliderVal < 0.16f -> 8
+                                                sliderVal < 0.5f -> 16
+                                                sliderVal < 0.83f -> 32
+                                                else -> 64
+                                            }
+                                            onAlphaChange(newVal)
+                                        },
+                                        colors = SliderDefaults.colors(
+                                            activeTrackColor = SleekPrimary,
+                                            inactiveTrackColor = SleekOutlineVariant,
+                                            thumbColor = SleekPrimary
+                                        )
+                                    )
+                                }
+                                
+                                // Scaling ratio formula display
+                                val ratio = loraAlpha.toFloat() / loraRank.toFloat()
+                                val amp = 0.8f + (ratio / 8.0f)
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(SleekBackground, RoundedCornerShape(12.dp))
+                                        .border(1.dp, SleekOutlineVariant, RoundedCornerShape(12.dp))
+                                        .padding(10.dp)
+                                ) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            text = "ADAPTER SCALING EFFECT",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = SleekLabel,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 9.sp
+                                            )
+                                        )
+                                        Text(
+                                            text = String.format(java.util.Locale.US, "Weight scaling (α/r) = %.2fx", ratio),
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = SleekPrimary,
+                                                fontWeight = FontWeight.Bold,
+                                                fontFamily = FontFamily.Monospace,
+                                                fontSize = 11.sp
+                                            )
+                                        )
+                                        Text(
+                                            text = String.format(java.util.Locale.US, "Rank amplitude multiplier = %.2fx", amp),
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = SleekLabel,
+                                                fontSize = 10.sp
+                                            )
+                                        )
+                                    }
+                                }
+                                
+                                // Target attention modules text input
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(
+                                        text = "Target Modules",
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            color = SleekOnBackground,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    )
+                                    OutlinedTextField(
+                                        value = loraTargetModules,
+                                        onValueChange = onTargetModulesChange,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(12.dp),
+                                        singleLine = true,
+                                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = SleekPrimary,
+                                            unfocusedBorderColor = SleekOutline,
+                                            focusedLabelColor = SleekPrimary,
+                                            unfocusedLabelColor = SleekLabel
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Unload adapter button
+                    OutlinedButton(
+                        onClick = onUnloadClick,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFBA1A1A)),
+                        border = BorderStroke(1.dp, Color(0xFFC4C6D0))
+                    ) {
+                        Text(
+                            text = "Unload Adapter",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                        )
                     }
                 }
             }

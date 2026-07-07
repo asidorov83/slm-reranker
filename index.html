@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Download NanoRank AI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #FDFBFF;
+            --on-bg-color: #1B1B1F;
+            --primary-color: #005AC1;
+            --primary-container: #D1E4FF;
+            --on-primary-container: #001D36;
+            --surface-variant: #F3F3F7;
+            --outline: #C4C6D0;
+            --outline-variant: #E1E2EC;
+            --label-color: #44474E;
+            --accent-pill: #D1E4FF;
+            --accent-pill-text: #001D36;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #111318;
+                --on-bg-color: #E2E2E6;
+                --primary-color: #ADC6FF;
+                --primary-container: #004494;
+                --on-primary-container: #D1E4FF;
+                --surface-variant: #43474E;
+                --outline: #8D9199;
+                --outline-variant: #43474E;
+                --label-color: #C3C6CF;
+                --accent-pill: #004494;
+                --accent-pill-text: #D1E4FF;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--on-bg-color);
+            line-height: 1.6;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 24px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 520px;
+            background: var(--surface-variant);
+            border: 1px solid var(--outline-variant);
+            border-radius: 28px;
+            padding: 32px;
+            box-shadow: 0 12px 32px rgba(0,0,0,0.05);
+            text-align: center;
+            transition: transform 0.2s ease;
+        }
+
+        .logo-container {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        h1 {
+            font-size: 28px;
+            font-weight: 800;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+        }
+
+        .subtitle {
+            font-size: 14px;
+            color: var(--label-color);
+            margin-bottom: 24px;
+        }
+
+        .download-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            background-color: var(--primary-color);
+            color: var(--bg-color);
+            text-decoration: none;
+            font-weight: 700;
+            font-size: 16px;
+            padding: 16px 32px;
+            border-radius: 100px;
+            box-shadow: 0 4px 12px rgba(0,90,193,0.2);
+            transition: all 0.2s ease;
+            width: 100%;
+            margin-bottom: 24px;
+        }
+
+        .download-btn:hover {
+            opacity: 0.95;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,90,193,0.3);
+        }
+
+        .download-btn:active {
+            transform: translateY(0);
+        }
+
+        .spec-box {
+            background: var(--bg-color);
+            border: 1px solid var(--outline-variant);
+            border-radius: 16px;
+            padding: 16px;
+            text-align: left;
+            margin-bottom: 24px;
+            font-size: 12px;
+        }
+
+        .spec-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+
+        .spec-row:last-child {
+            margin-bottom: 0;
+        }
+
+        .spec-label {
+            color: var(--label-color);
+            font-weight: 500;
+        }
+
+        .spec-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 700;
+        }
+
+        .instructions {
+            text-align: left;
+            border-top: 1px solid var(--outline-variant);
+            padding-top: 24px;
+        }
+
+        .instructions h2 {
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .steps {
+            list-style: none;
+            font-size: 13px;
+            color: var(--label-color);
+        }
+
+        .steps li {
+            position: relative;
+            padding-left: 24px;
+            margin-bottom: 10px;
+        }
+
+        .steps li::before {
+            content: "✓";
+            position: absolute;
+            left: 0;
+            color: var(--primary-color);
+            font-weight: 700;
+        }
+
+        .optimization-badge {
+            background-color: var(--accent-pill);
+            color: var(--accent-pill-text);
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 4px 12px;
+            border-radius: 100px;
+            margin-bottom: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo-container">🤖</div>
+        <div class="optimization-badge">⚙️ Highly Optimized (< 6 MB)</div>
+        <h1>NanoRank AI</h1>
+        <p class="subtitle">On-device personalization and ranking engine styled with the Sleek Interface theme.</p>
+        
+        <a href="/binaries/nanorank-ai-debug.apk" class="download-btn">
+            <span>📥</span> Download APK
+        </a>
+
+        <div class="spec-box">
+            <div class="spec-row">
+                <span class="spec-label">File Name:</span>
+                <span class="spec-value">nanorank-ai-debug.apk</span>
+            </div>
+            <div class="spec-row">
+                <span class="spec-label">File Size:</span>
+                <span class="spec-value">5.9 MB (6,162,932 bytes)</span>
+            </div>
+            <div class="spec-row">
+                <span class="spec-label">MD5 Hash:</span>
+                <span class="spec-value" style="font-size: 11px;">2586452abfc57d1a07b32b17dc0800c0</span>
+            </div>
+        </div>
+
+        <div class="instructions">
+            <h2>📲 Installation Instructions</h2>
+            <ul class="steps">
+                <li>Click the <strong>Download APK</strong> button above to download the file directly.</li>
+                <li>Ensure the downloaded file size is exactly <strong>5.9 MB</strong>.</li>
+                <li>Tap the file in your downloads folder to install.</li>
+                <li>If prompted, enable <strong>"Install from Unknown Sources"</strong> in your browser or file manager settings.</li>
+                <li>Open the app and enjoy high-speed, on-device Gemini Nano LoRA adapter testing!</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
