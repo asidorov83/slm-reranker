@@ -191,20 +191,17 @@ fun buildGeminiPrompt(
     loraAlpha: Int,
     ragCategories: List<String>
 ): String {
-    fun String.truncate(maxLength: Int): String =
-        if (this.length > maxLength) this.substring(0, maxLength) + "..." else this
-
     return """
         You are a low-latency, on-device contextual personalization and catalog ranking model.
         Rank the following list of items based on the user's demographic identity, historical purchases, active external context, recency signals (viewed items), and long-term interest indicators (favorites).
         
-        User Identity Profile: ${identity.truncate(1000)}
-        Historic Purchases: ${history.truncate(1500)}
-        Current Context/Environment: ${context.truncate(1000)}
-        Items to Rank: ${itemsText.truncate(4000)}
-        Recently Viewed: ${viewedItemsText.truncate(1500)}
-        Favorites: ${favoritedItemsText.truncate(1500)}
-        RAG retrieved demographics: ${ragCategories.joinToString(", ").truncate(1000)}
+        User Identity Profile: $identity
+        Historic Purchases: $history
+        Current Context/Environment: $context
+        Items to Rank: $itemsText
+        Recently Viewed: $viewedItemsText
+        Favorites: $favoritedItemsText
+        RAG retrieved demographics: ${ragCategories.joinToString(", ")}
         ${if (isLoraActive) "Active Low-Rank Adapter: $loraSpecialization (Rank=$loraRank, Alpha=$loraAlpha)" else ""}
         
         You MUST return a ranked sequence of items. Format your output exactly as a structured list, with one item per line, formatted exactly as:
@@ -294,7 +291,22 @@ suspend fun rankItemsOnDeviceWithFallback(
         )
         
         onStatusUpdate("Firing local on-device neural inference...")
-        val response = generativeModel.generateContent(prompt)
+        val response = try {
+            generativeModel.generateContent(prompt)
+        } catch (e: Exception) {
+            val errorString = e.toString()
+            if (errorString.contains("Input text length exceeds the limit") || errorString.contains("INFERENCE_ERROR") || errorString.contains("COMPUTE_ERROR")) {
+                onStatusUpdate("Размер контекста превышен (ошибка API). Запускаем алгоритм суммаризации...")
+                val oversizedItems = rerankWithSummarizationFallback(
+                    generativeModel, identity, history, externalContext, itemsText, viewedItemsText, favoritedItemsText,
+                    isLoraActive, loraSpecialization, loraRank, loraAlpha, ragCategories, onStatusUpdate
+                )
+                return Pair(oversizedItems, true)
+            } else {
+                throw e
+            }
+        }
+
         val text = response.candidates.firstOrNull()?.text ?: ""
         
         if (text.isBlank()) {
