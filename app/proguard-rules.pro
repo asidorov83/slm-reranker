@@ -33,3 +33,5 @@
 -dontwarn kotlinx.coroutines.**
 -keep class kotlinx.coroutines.** { *; }
 
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.internal.mlkit_genai_prompt.** { *; }

@@ -15,7 +15,7 @@ android {
 
   defaultConfig {
     applicationId = "com.aistudio.gemininanosorter.qyztxp"
-    minSdk = 24
+    minSdk = 31
     targetSdk = 35
     versionCode = 1
     versionName = "1.0"
@@ -49,8 +49,8 @@ android {
       signingConfig = signingConfigs.getByName("release")
     }
     debug {
-      isMinifyEnabled = true
-      isShrinkResources = true
+      isMinifyEnabled = false
+      isShrinkResources = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("debugConfig")
     }
@@ -109,6 +109,7 @@ dependencies {
   // implementation(libs.firebase.appcheck.recaptcha)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
+  implementation(libs.mlkit.genai.prompt)
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)
@@ -133,3 +134,20 @@ dependencies {
   // "ksp"(libs.androidx.room.compiler)
   // "ksp"(libs.moshi.kotlin.codegen)
 }
+
+tasks.register<Copy>("copyApkToBinaries") {
+    from(file("${project.layout.buildDirectory.get().asFile}/outputs/apk/debug/app-debug.apk"))
+    into(file("${rootDir}/binaries"))
+    rename { "nanorank-ai-debug.apk" }
+}
+
+tasks.register<Copy>("copyApkToBuildOutputs") {
+    from(file("${project.layout.buildDirectory.get().asFile}/outputs/apk/debug/app-debug.apk"))
+    into(file("${rootDir}/.build-outputs"))
+    rename { "app-debug.apk" }
+}
+
+afterEvaluate {
+    tasks.findByName("assembleDebug")?.finalizedBy("copyApkToBinaries", "copyApkToBuildOutputs")
+}
+
