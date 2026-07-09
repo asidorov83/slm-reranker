@@ -110,6 +110,7 @@ dependencies {
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.mlkit.genai.prompt)
+  implementation("com.google.ai.edge.localagents:localagents-rag:0.3.0")
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)

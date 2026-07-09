@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+Created-By: bazel
+Target-Label: //third_party/odml/genai_modules/rag_pipeline/java/com/goo
+ gle/ai/edge/localagents/rag:rag_lib
+
