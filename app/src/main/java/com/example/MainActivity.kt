@@ -212,6 +212,40 @@ data class ItemNdcgRating(
 )
 
 // Helper parser for NDCG ratings from JSON/text
+fun parseSingleNdcgRating(text: String, itemName: String): ItemRating {
+    try {
+        val jsonStart = text.indexOf("{")
+        val jsonEnd = text.lastIndexOf("}")
+        if (jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart) {
+            val jsonString = text.substring(jsonStart, jsonEnd + 1)
+            val obj = org.json.JSONObject(jsonString)
+            return ItemRating(
+                name = obj.optString("name", itemName),
+                rating = obj.optInt("rating", 3),
+                reason = obj.optString("reason", "Оценка сгенерирована")
+            )
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    
+    // Fallback: regex parsing
+    try {
+        val pattern = Regex("""\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"rating"\s*:\s*(\d)\s*,\s*"reason"\s*:\s*"([^"]+)"\s*\}""")
+        val match = pattern.find(text)
+        if (match != null) {
+            val name = match.groupValues[1]
+            val rating = match.groupValues[2].toIntOrNull() ?: 3
+            val reason = match.groupValues[3]
+            return ItemRating(name, rating, reason)
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    
+    return ItemRating(name = itemName, rating = 3, reason = "Оценка по умолчанию (товар не распознан моделью)")
+}
+
 fun parseNdcgRatings(text: String): List<ItemRating> {
     val results = mutableListOf<ItemRating>()
     try {
@@ -1424,6 +1458,15 @@ fun MainScreen() {
     var baselineNdcg by remember { mutableStateOf(0.0) }
     var rerankedNdcg by remember { mutableStateOf(0.0) }
     
+    // Quality Analysis state
+    var compareCountText by remember { mutableStateOf("3") }
+    var isComparingQuality by remember { mutableStateOf(false) }
+    var isShowingQualityResultDialog by remember { mutableStateOf(false) }
+    var qualityBaselineNdcg by remember { mutableStateOf(0.0) }
+    var qualityOptimizedNdcg by remember { mutableStateOf(0.0) }
+    var qualityBaselineItemsEvaluated by remember { mutableStateOf<List<ItemRating>>(emptyList()) }
+    var qualityOptimizedItemsEvaluated by remember { mutableStateOf<List<ItemRating>>(emptyList()) }
+    
     var selectedPresetIndex by remember { mutableStateOf(0) }
     
     // New RAG / Embedding states
@@ -2488,6 +2531,478 @@ fun MainScreen() {
                                 clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(rawModelOutput))
                                 Toast.makeText(context, "Вывод скопирован в буфер обмена!", Toast.LENGTH_SHORT).show()
                             }
+                        }
+                    ) {
+                        Text("Копировать", color = SleekPrimary)
+                    }
+                },
+                containerColor = SleekSurfaceVariant,
+                shape = RoundedCornerShape(24.dp)
+            )
+        }
+
+        // ANALYZE QUALITY block
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp)
+                .clickable {
+                    if (qualityBaselineItemsEvaluated.isNotEmpty() || qualityOptimizedItemsEvaluated.isNotEmpty()) {
+                        isShowingQualityResultDialog = true
+                    } else {
+                        Toast.makeText(context, "Результаты анализа пока отсутствуют", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                .testTag("analyze_quality_card"),
+            colors = CardDefaults.cardColors(
+                containerColor = SleekSurfaceVariant
+            ),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, SleekOutline.copy(alpha = 0.5f))
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "📊 Анализ качества (NDCG)",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = SleekPrimary,
+                            letterSpacing = 0.5.sp
+                        )
+                    )
+                    Box(
+                        modifier = Modifier
+                            .background(SleekPrimary.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "EVALUATION",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = SleekPrimary,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 8.sp
+                            )
+                        )
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(4.dp))
+                
+                Text(
+                    text = "Сравните исходную выдачу с оптимизированной. Gemini Nano оценит релевантность элементов и рассчитает NDCG метрику для обеих последовательностей.",
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        color = SleekOnBackground.copy(alpha = 0.6f),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
+                )
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Input Field for Number of items
+                    OutlinedTextField(
+                        value = compareCountText,
+                        onValueChange = { newValue ->
+                            if (newValue.all { it.isDigit() }) {
+                                compareCountText = newValue
+                            }
+                        },
+                        label = {
+                            Text(
+                                text = "Количество элементов",
+                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp)
+                            )
+                        },
+                        placeholder = {
+                            Text(text = "3")
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("compare_count_input"),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(
+                            color = SleekOnBackground,
+                            fontSize = 12.sp
+                        ),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = SleekOnBackground,
+                            unfocusedTextColor = SleekOnBackground,
+                            focusedContainerColor = SleekBackground,
+                            unfocusedContainerColor = SleekBackground,
+                            focusedBorderColor = SleekPrimary,
+                            unfocusedBorderColor = SleekOutline,
+                            cursorColor = SleekPrimary
+                        )
+                    )
+                    
+                    // Compare Button
+                    Button(
+                        onClick = {
+                            coroutineScope.launch {
+                                try {
+                                    isComparingQuality = true
+                                    val N = compareCountText.toIntOrNull() ?: 3
+                                    if (N <= 0) {
+                                        Toast.makeText(context, "Количество элементов должно быть больше 0", Toast.LENGTH_SHORT).show()
+                                        return@launch
+                                    }
+                                    
+                                    val baselineItems = splitItemsText(itemsToRank).take(N)
+                                    if (baselineItems.isEmpty()) {
+                                        Toast.makeText(context, "Список Items to Rank пуст!", Toast.LENGTH_SHORT).show()
+                                        return@launch
+                                    }
+                                    
+                                    if (rankedResults.isEmpty()) {
+                                        Toast.makeText(context, "Список Optimized Results пуст! Сначала выполните RANK CATALOG.", Toast.LENGTH_LONG).show()
+                                        return@launch
+                                    }
+                                    
+                                    val optimizedItems = rankedResults.take(N).map { it.name }
+                                    val combinedItems = (baselineItems + optimizedItems).distinct()
+                                    
+                                    val ragCategoriesText = retrievedCategories.joinToString(", ")
+                                    val ragContextText = topRagLines.joinToString("\n") { "- ${it.originalLine}" }
+                                    
+                                    val ratingsCache = mutableMapOf<String, ItemRating>()
+                                    
+                                    for (itemName in combinedItems) {
+                                        var itemRating: ItemRating? = null
+                                        for (attempt in 1..3) {
+                                            try {
+                                                val text = kotlinx.coroutines.withTimeout(15000L) {
+                                                    generateWithGeminiNanoAutoCompress(
+                                                        identity = userIdentity,
+                                                        history = purchaseHistory,
+                                                        context = externalContext,
+                                                        viewed = viewedItems,
+                                                        favorited = favoritedItems,
+                                                        actions = userActions,
+                                                        ragCategoriesText = ragCategoriesText,
+                                                        ragContextText = ragContextText,
+                                                        isLoraActive = isLoraActive,
+                                                        loraSpecialization = loraSpecialization,
+                                                        loraRank = loraRank,
+                                                        loraAlpha = loraAlpha,
+                                                        promptType = "quality_analysis_single",
+                                                        extraInput = itemName,
+                                                        onStatusUpdate = { }
+                                                    )
+                                                }
+                                                val parsed = parseSingleNdcgRating(text, itemName)
+                                                if (!parsed.reason.contains("по умолчанию")) {
+                                                    itemRating = parsed
+                                                    break
+                                                }
+                                            } catch (e: Exception) {
+                                                e.printStackTrace()
+                                            }
+                                        }
+                                        ratingsCache[itemName.lowercase().trim()] = itemRating ?: ItemRating(itemName, 3, "Оценка по умолчанию (товар не распознан моделью)")
+                                    }
+                                    
+                                    val finalBaselineEvaluated = baselineItems.map { name ->
+                                        ratingsCache[name.lowercase().trim()] ?: ItemRating(name, 3, "Оценка по умолчанию")
+                                    }
+                                    
+                                    val finalOptimizedEvaluated = optimizedItems.map { name ->
+                                        ratingsCache[name.lowercase().trim()] ?: ItemRating(name, 3, "Оценка по умолчанию")
+                                    }
+                                    
+                                    qualityBaselineNdcg = calculateNdcg(finalBaselineEvaluated.map { it.rating })
+                                    qualityOptimizedNdcg = calculateNdcg(finalOptimizedEvaluated.map { it.rating })
+                                    
+                                    qualityBaselineItemsEvaluated = finalBaselineEvaluated
+                                    qualityOptimizedItemsEvaluated = finalOptimizedEvaluated
+                                    
+                                    isShowingQualityResultDialog = true
+                                    Toast.makeText(context, "Анализ качества успешно завершен!", Toast.LENGTH_SHORT).show()
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                    Toast.makeText(context, "Ошибка при сравнении выдач: ${e.message}", Toast.LENGTH_LONG).show()
+                                } finally {
+                                    isComparingQuality = false
+                                }
+                            }
+                        },
+                        enabled = !isComparingQuality && itemsToRank.isNotBlank() && rankedResults.isNotEmpty(),
+                        modifier = Modifier
+                            .weight(1.2f)
+                            .height(56.dp)
+                            .testTag("compare_outputs_button"),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SleekPrimary,
+                            contentColor = Color.White,
+                            disabledContainerColor = SleekOutline,
+                            disabledContentColor = SleekOnBackground.copy(alpha = 0.4f)
+                        )
+                    ) {
+                        if (isComparingQuality) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                color = Color.White,
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = "СРАВНИТЬ ВЫДАЧИ",
+                                    style = MaterialTheme.typography.titleSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp
+                                    )
+                                )
+                                Text("📊", fontSize = 14.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // QUALITY RESULT DIALOG
+        if (isShowingQualityResultDialog) {
+            AlertDialog(
+                onDismissRequest = { isShowingQualityResultDialog = false },
+                title = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("📊", fontSize = 24.sp)
+                        Text(
+                            text = "Результаты анализа качества",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = SleekOnBackground
+                            )
+                        )
+                    }
+                },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Text(
+                            text = "Сравнение метрики NDCG (Normalized Discounted Cumulative Gain) на основе оценок релевантности (1-5), выставленных Gemini Nano локально на NPU.",
+                            style = MaterialTheme.typography.bodySmall.copy(color = SleekLabel, fontSize = 12.sp)
+                        )
+                        
+                        // NDCG Scores Side-by-Side Cards
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Card(
+                                modifier = Modifier.weight(1f),
+                                colors = CardDefaults.cardColors(containerColor = SleekBackground),
+                                border = BorderStroke(1.dp, SleekOutline.copy(alpha = 0.3f))
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "Items to Rank (Baseline)",
+                                        style = MaterialTheme.typography.labelSmall.copy(color = SleekLabel, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
+                                        fontSize = 10.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = String.format(java.util.Locale.US, "%.3f", qualityBaselineNdcg),
+                                        style = MaterialTheme.typography.titleLarge.copy(color = SleekPrimary, fontWeight = FontWeight.Bold),
+                                        fontSize = 24.sp
+                                    )
+                                }
+                            }
+                            
+                            Card(
+                                modifier = Modifier.weight(1f),
+                                colors = CardDefaults.cardColors(containerColor = SleekBackground),
+                                border = BorderStroke(1.dp, SleekOutline.copy(alpha = 0.3f))
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "Optimized Results (Reranked)",
+                                        style = MaterialTheme.typography.labelSmall.copy(color = SleekLabel, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
+                                        fontSize = 10.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = String.format(java.util.Locale.US, "%.3f", qualityOptimizedNdcg),
+                                        style = MaterialTheme.typography.titleLarge.copy(color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold),
+                                        fontSize = 24.sp
+                                    )
+                                }
+                            }
+                        }
+                        
+                        // Table Headers
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(SleekBackground, RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
+                                .border(0.5.dp, SleekOutline, RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
+                                .padding(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "Исходный каталог (Top N)",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = SleekPrimary),
+                                textAlign = TextAlign.Center
+                            )
+                            Box(modifier = Modifier.width(1.dp).height(16.dp).background(SleekOutline))
+                            Text(
+                                text = "Оптимизированный (Top N)",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32)),
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                        
+                        // Table Body inside Scrollable Box
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 300.dp)
+                                .border(0.5.dp, SleekOutline, RoundedCornerShape(bottomStart = 8.dp, bottomEnd = 8.dp))
+                                .padding(2.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                val maxRows = maxOf(qualityBaselineItemsEvaluated.size, qualityOptimizedItemsEvaluated.size)
+                                for (i in 0 until maxRows) {
+                                    val baselineItem = qualityBaselineItemsEvaluated.getOrNull(i)
+                                    val optimizedItem = qualityOptimizedItemsEvaluated.getOrNull(i)
+                                    
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .background(if (i % 2 == 0) SleekBackground.copy(alpha = 0.4f) else Color.Transparent)
+                                            .padding(6.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.Top
+                                    ) {
+                                        // Left column
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            if (baselineItem != null) {
+                                                Text(
+                                                    text = "${i + 1}. ${baselineItem.name}",
+                                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold, color = SleekOnBackground),
+                                                    fontSize = 11.sp
+                                                )
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "⭐ ${baselineItem.rating}/5",
+                                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, color = SleekPrimary),
+                                                        fontSize = 10.sp
+                                                    )
+                                                }
+                                                Text(
+                                                    text = baselineItem.reason,
+                                                    style = MaterialTheme.typography.bodySmall.copy(color = SleekLabel),
+                                                    fontSize = 10.sp,
+                                                    lineHeight = 13.sp
+                                                )
+                                            } else {
+                                                Text("-", style = MaterialTheme.typography.bodySmall.copy(color = SleekLabel))
+                                            }
+                                        }
+                                        
+                                        // Divider line
+                                        Box(
+                                            modifier = Modifier
+                                                .width(1.dp)
+                                                .height(80.dp)
+                                                .background(SleekOutline.copy(alpha = 0.3f))
+                                        )
+                                        
+                                        // Right column
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            if (optimizedItem != null) {
+                                                Text(
+                                                    text = "${i + 1}. ${optimizedItem.name}",
+                                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold, color = SleekOnBackground),
+                                                    fontSize = 11.sp
+                                                )
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "⭐ ${optimizedItem.rating}/5",
+                                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32)),
+                                                        fontSize = 10.sp
+                                                    )
+                                                }
+                                                Text(
+                                                    text = optimizedItem.reason,
+                                                    style = MaterialTheme.typography.bodySmall.copy(color = SleekLabel),
+                                                    fontSize = 10.sp,
+                                                    lineHeight = 13.sp
+                                                )
+                                            } else {
+                                                Text("-", style = MaterialTheme.typography.bodySmall.copy(color = SleekLabel))
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = { isShowingQualityResultDialog = false },
+                        colors = ButtonDefaults.buttonColors(containerColor = SleekPrimary)
+                    ) {
+                        Text("Закрыть", color = Color.White)
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            val sb = StringBuilder()
+                            sb.append("NDCG Baseline: ").append(String.format(java.util.Locale.US, "%.3f", qualityBaselineNdcg)).append("\n")
+                            sb.append("NDCG Optimized: ").append(String.format(java.util.Locale.US, "%.3f", qualityOptimizedNdcg)).append("\n\n")
+                            val maxRows = maxOf(qualityBaselineItemsEvaluated.size, qualityOptimizedItemsEvaluated.size)
+                            for (i in 0 until maxRows) {
+                                val b = qualityBaselineItemsEvaluated.getOrNull(i)
+                                val o = qualityOptimizedItemsEvaluated.getOrNull(i)
+                                sb.append("Row ${i + 1}:\n")
+                                if (b != null) sb.append("  Baseline: ${b.name} (⭐ ${b.rating}/5) - ${b.reason}\n")
+                                if (o != null) sb.append("  Optimized: ${o.name} (⭐ ${o.rating}/5) - ${o.reason}\n")
+                                sb.append("\n")
+                            }
+                            clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(sb.toString()))
+                            Toast.makeText(context, "Результаты скопированы!", Toast.LENGTH_SHORT).show()
                         }
                     ) {
                         Text("Копировать", color = SleekPrimary)
@@ -4061,12 +4576,12 @@ fun GeminiNanoQaCard(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp),
+                    .heightIn(min = 64.dp, max = 120.dp),
                 textStyle = MaterialTheme.typography.bodySmall.copy(
                     color = SleekOnBackground,
                     fontSize = 12.sp
                 ),
-                maxLines = 2,
+                maxLines = 3,
                 shape = RoundedCornerShape(8.dp),
                 colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
                     focusedTextColor = SleekOnBackground,
@@ -4125,13 +4640,33 @@ fun GeminiNanoQaCard(
             if (answer.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(16.dp))
                 
-                Text(
-                    text = "Ответ ассистента:",
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = SleekOnBackground.copy(alpha = 0.9f)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Ответ ассистента:",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = SleekOnBackground.copy(alpha = 0.9f)
+                        )
                     )
-                )
+                    
+                    val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            val textToCopy = "Вопрос: $question\n\nОтвет:\n$answer"
+                            clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(textToCopy))
+                            android.widget.Toast.makeText(context, "Скопировано в буфер!", android.widget.Toast.LENGTH_SHORT).show()
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                        modifier = Modifier.height(24.dp)
+                    ) {
+                        Text("КОПИРОВАТЬ", fontSize = 10.sp, color = SleekPrimary)
+                    }
+                }
                 
                 Spacer(modifier = Modifier.height(6.dp))
                 

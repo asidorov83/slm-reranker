@@ -136,19 +136,22 @@ dependencies {
   // "ksp"(libs.moshi.kotlin.codegen)
 }
 
-tasks.register<Copy>("copyApkToBinaries") {
-    from(file("${project.layout.buildDirectory.get().asFile}/outputs/apk/debug/app-debug.apk"))
-    into(file("${rootDir}/binaries"))
-    rename { "nanorank-ai-debug.apk" }
-}
-
-tasks.register<Copy>("copyApkToBuildOutputs") {
-    from(file("${project.layout.buildDirectory.get().asFile}/outputs/apk/debug/app-debug.apk"))
-    into(file("${rootDir}/.build-outputs"))
-    rename { "app-debug.apk" }
-}
-
 afterEvaluate {
-    tasks.findByName("assembleDebug")?.finalizedBy("copyApkToBinaries", "copyApkToBuildOutputs")
+    tasks.findByName("assembleDebug")?.doLast {
+        val apkFile = file("${project.layout.buildDirectory.get().asFile}/outputs/apk/debug/app-debug.apk")
+        if (apkFile.exists()) {
+            val binariesDir = file("${rootDir}/binaries")
+            binariesDir.mkdirs()
+            apkFile.copyTo(binariesDir.resolve("nanorank-ai-debug.apk"), overwrite = true)
+            
+            val buildOutputsDir = file("${rootDir}/.build-outputs")
+            buildOutputsDir.mkdirs()
+            apkFile.copyTo(buildOutputsDir.resolve("app-debug.apk"), overwrite = true)
+            
+            println("Successfully copied APK to binaries (size: ${apkFile.length()} bytes) and .build-outputs")
+        } else {
+            println("Warning: app-debug.apk not found at ${apkFile.absolutePath}")
+        }
+    }
 }
 
