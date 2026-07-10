@@ -197,6 +197,81 @@ fun Modifier.dashedBorder(
 // Scored Item Data Class
 data class ScoredItem(val name: String, val reason: String, val score: Int)
 
+// Data class for Gemini Nano relevance ratings
+data class ItemRating(val name: String, val rating: Int, val reason: String)
+
+// Data class for NDCG comparison results
+data class ItemNdcgRating(
+    val name: String,
+    val rating: Int,
+    val reason: String,
+    val isBaseline: Boolean,
+    val isReranked: Boolean,
+    val baselineRank: Int?,
+    val rerankedRank: Int?
+)
+
+// Helper parser for NDCG ratings from JSON/text
+fun parseNdcgRatings(text: String): List<ItemRating> {
+    val results = mutableListOf<ItemRating>()
+    try {
+        val jsonStart = text.indexOf("[")
+        val jsonEnd = text.lastIndexOf("]")
+        if (jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart) {
+            val jsonString = text.substring(jsonStart, jsonEnd + 1)
+            val jsonArray = org.json.JSONArray(jsonString)
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.getJSONObject(i)
+                results.add(
+                    ItemRating(
+                        name = obj.optString("name", "Unknown"),
+                        rating = obj.optInt("rating", 3),
+                        reason = obj.optString("reason", "")
+                    )
+                )
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    
+    // Fallback: regex parsing
+    if (results.isEmpty()) {
+        try {
+            val pattern = Regex("""\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"rating"\s*:\s*(\d)\s*,\s*"reason"\s*:\s*"([^"]+)"\s*\}""")
+            pattern.findAll(text).forEach { match ->
+                val name = match.groupValues[1]
+                val rating = match.groupValues[2].toIntOrNull() ?: 3
+                val reason = match.groupValues[3]
+                results.add(ItemRating(name, rating, reason))
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    return results
+}
+
+// NDCG Math Helpers
+fun calculateDcg(scores: List<Int>): Double {
+    var dcg = 0.0
+    for (i in scores.indices) {
+        val rel = scores[i]
+        val numerator = Math.pow(2.0, rel.toDouble()) - 1.0
+        val denominator = kotlin.math.log2((i + 2).toDouble())
+        dcg += numerator / denominator
+    }
+    return dcg
+}
+
+fun calculateNdcg(scores: List<Int>): Double {
+    val dcg = calculateDcg(scores)
+    val idealScores = scores.sortedDescending()
+    val idcg = calculateDcg(idealScores)
+    if (idcg == 0.0) return 0.0
+    return dcg / idcg
+}
+
 // Personalization Scenario Preset Data Class
 data class PersonalizationPreset(
     val name: String,
@@ -529,6 +604,56 @@ suspend fun rankItemsOnDeviceWithFallback(
         onRawOutput(simulatedRaw)
         return Pair(fallback, false)
     }
+}
+
+suspend fun generateWithGeminiNano(
+    prompt: String,
+    onStatus: (String) -> Unit = {}
+): String {
+    val generativeModel = com.google.mlkit.genai.prompt.Generation.getClient()
+    val status = generativeModel.checkStatus()
+    when (status) {
+        com.google.mlkit.genai.common.FeatureStatus.DOWNLOADABLE -> {
+            onStatus("Загрузка Gemini Nano...")
+            var isCompleted = false
+            generativeModel.download().collect { downloadStatus ->
+                when (downloadStatus) {
+                    is com.google.mlkit.genai.common.DownloadStatus.DownloadProgress -> {
+                        val mb = downloadStatus.totalBytesDownloaded / (1024.0 * 1024.0)
+                        onStatus(String.format(java.util.Locale.US, "Загрузка: %.2f MB...", mb))
+                    }
+                    is com.google.mlkit.genai.common.DownloadStatus.DownloadCompleted -> {
+                        onStatus("Загрузка завершена!")
+                        isCompleted = true
+                    }
+                    is com.google.mlkit.genai.common.DownloadStatus.DownloadFailed -> {
+                        throw Exception("Загрузка не удалась: ${downloadStatus.e?.message ?: "Unknown error"}")
+                    }
+                    is com.google.mlkit.genai.common.DownloadStatus.DownloadStarted -> {
+                        onStatus("Загрузка запущена...")
+                    }
+                }
+            }
+        }
+        com.google.mlkit.genai.common.FeatureStatus.DOWNLOADING -> {
+            onStatus("Модель скачивается...")
+            throw Exception("Модель скачивается. Пожалуйста, подождите.")
+        }
+        com.google.mlkit.genai.common.FeatureStatus.UNAVAILABLE -> {
+            throw Exception("Gemini Nano не поддерживается на этом устройстве.")
+        }
+        com.google.mlkit.genai.common.FeatureStatus.AVAILABLE -> {
+            // Available, proceed
+        }
+    }
+    
+    onStatus("Локальная генерация на NPU...")
+    val response = generativeModel.generateContent(prompt)
+    val text = response.candidates.firstOrNull()?.text ?: ""
+    if (text.isBlank()) {
+        throw Exception("Модель вернула пустой ответ")
+    }
+    return text.trim()
 }
 
 // Rule-based simulation of Gemini Nano on-device context ranker with LoRA adapter support
@@ -902,6 +1027,364 @@ fun generateRerankedCritique(
     return critiqueBuilder.toString()
 }
 
+object AssumptionGenerators {
+    fun generateUserHeuristics(
+        identity: String,
+        history: String,
+        contextText: String,
+        favorites: String,
+        viewed: String,
+        actions: String
+    ): String {
+        val idLower = identity.lowercase()
+        val histLower = history.lowercase()
+        val isFemale = idLower.contains("female") || idLower.contains("жен") || idLower.contains("девушка") || idLower.contains("alice")
+        val isMale = idLower.contains("male") || idLower.contains("муж") || idLower.contains("bob") || idLower.contains("charlie")
+        
+        // 1. Gender
+        val gender = when {
+            isFemale && idLower.contains("гей") -> "гей"
+            isFemale && idLower.contains("лесби") -> "лесбиянка"
+            isFemale -> "женский"
+            isMale && idLower.contains("гей") -> "гей"
+            isMale -> "мужской"
+            else -> "женский"
+        }
+
+        // 2. Age
+        var ageNum = 28
+        val ageRegex = Regex("(\\d+)\\s*(y|лет|года|год)?")
+        val match = ageRegex.find(identity)
+        if (match != null) {
+            ageNum = match.groupValues[1].toIntOrNull() ?: 28
+        }
+        val ageGroup = when {
+            ageNum <= 14 -> "0-14 лет"
+            ageNum <= 24 -> "15–24 лет"
+            ageNum <= 34 -> "25–34 лет"
+            ageNum <= 44 -> "35–44 лет"
+            ageNum <= 54 -> "45–54 лет"
+            ageNum <= 64 -> "55–64 лет"
+            else -> "65+ лет"
+        }
+
+        // 3. Income
+        val income = when {
+            idLower.contains("director") || idLower.contains("руковод") || idLower.contains("начальн") || idLower.contains("управля") -> "Сверхвысокий"
+            idLower.contains("engineer") || idLower.contains("developer") || idLower.contains("програм") || idLower.contains("инженер") -> "Высокий"
+            idLower.contains("designer") || idLower.contains("teacher") || idLower.contains("дизайн") || idLower.contains("учитель") -> "Средний"
+            else -> "Средний"
+        }
+
+        // 4. Religion
+        val religion = when {
+            idLower.contains("christian") || idLower.contains("христиан") || idLower.contains("правосл") -> "Православие"
+            idLower.contains("muslim") || idLower.contains("мусульм") || idLower.contains("ислам") -> "Ислам"
+            idLower.contains("buddhist") || idLower.contains("будд") -> "Буддизм"
+            idLower.contains("jewish") || idLower.contains("иуде") || idLower.contains("иудаи") -> "Иудаизм"
+            idLower.contains("none") || idLower.contains("atheist") || idLower.contains("атеист") -> "Атеизм"
+            else -> "Атеизм"
+        }
+
+        // 5. Children
+        val childrenCount = when {
+            idLower.contains("2 children") || idLower.contains("2 ребенка") || idLower.contains("двое") -> "2"
+            idLower.contains("3 children") || idLower.contains("3 ребенка") || idLower.contains("трое") -> "3"
+            idLower.contains("more than 3") || idLower.contains("больше 3") -> "больше 3"
+            idLower.contains("1 child") || idLower.contains("1 ребенок") || idLower.contains("один") -> "1"
+            idLower.contains("none") || idLower.contains("no children") || idLower.contains("бездет") -> "0"
+            else -> "0"
+        }
+
+        // 6. Marital status
+        val marital = when {
+            idLower.contains("married") || idLower.contains("брак") || idLower.contains("жена") || idLower.contains("муж") || childrenCount != "0" -> "брак"
+            idLower.contains("cohabitation") || idLower.contains("сожитель") -> "сожительство"
+            else -> "нет"
+        }
+
+        // 7. Partner age
+        val partnerAge = if (marital == "брак" || marital == "сожительство") {
+            when (ageGroup) {
+                "15–24 лет" -> "18–24 лет"
+                "25–34 лет" -> "25–34 лет"
+                "35–44 лет" -> "35–44 лет"
+                "45–54 лет" -> "45–54 лет"
+                "55–64 лет" -> "55–64 лет"
+                "65+ лет" -> "65+ лет"
+                else -> "25–34 лет"
+            }
+        } else {
+            "нет"
+        }
+
+        // 8. Pets
+        val pets = when {
+            idLower.contains("dog") || idLower.contains("собак") || idLower.contains("пёс") -> "собаки"
+            idLower.contains("cat") || idLower.contains("кош") || idLower.contains("кот") -> "кошки"
+            idLower.contains("fish") || idLower.contains("рыб") -> "рыбки"
+            idLower.contains("bird") || idLower.contains("птиц") -> "птички"
+            else -> "отсутствуют"
+        }
+
+        // 9. Profession
+        val profession = when {
+            idLower.contains("director") || idLower.contains("manager") || idLower.contains("руковод") || idLower.contains("начальн") || idLower.contains("директор") ->
+                "Руководители (директоры, начальники, управляющие)"
+            idLower.contains("engineer") || idLower.contains("developer") || idLower.contains("programmer") || idLower.contains("врач") || idLower.contains("инженер") || idLower.contains("учитель") || idLower.contains("програм") ->
+                "Специалисты высшего уровня квалификации (врачи, инженеры, учители, программисты)"
+            idLower.contains("designer") || idLower.contains("nurse") || idLower.contains("техник") || idLower.contains("дизайн") ->
+                "Специалисты среднего уровня квалификации (медсестры, техники, фельдшеры)"
+            idLower.contains("driver") || idLower.contains("водитель") || idLower.contains("машинист") ->
+                "Операторы и водители оборудования и машин (водители, машинисты, токари)"
+            else -> "Специалисты высшего уровня квалификации (врачи, инженеры, учители, программисты)"
+        }
+
+        // 10. Birthday month
+        val birthMonth = when {
+            idLower.contains("alice") -> "октябрь"
+            idLower.contains("bob") -> "май"
+            idLower.contains("charlie") -> "декабрь"
+            else -> "июль"
+        }
+
+        // 11. Partner's birth month
+        val partnerBirthMonth = if (marital != "нет") "ноябрь" else "нет"
+
+        // 12. Father's birth month
+        val fatherBirthMonth = "август"
+
+        // 13. Mother's birth month
+        val motherBirthMonth = "апрель"
+
+        // 14. Eldest child's birth month
+        val eldestBirthMonth = if (childrenCount != "0") "март" else "нет"
+
+        // 15. Youngest child's birth month
+        val youngestBirthMonth = if (childrenCount == "2" || childrenCount == "3" || childrenCount == "больше 3") "сентябрь" else "нет"
+
+        // 16. Mother-in-law's birth month
+        val motherInLawBirthMonth = if (marital != "нет") "январь" else "нет"
+
+        // 17. Father-in-law's birth month
+        val fatherInLawBirthMonth = if (marital != "нет") "июнь" else "нет"
+
+        // 18. Eldest child's gender
+        val eldestGender = if (childrenCount != "0") "мужской" else "нет ребёнка"
+
+        // 19. Eldest child's age
+        val eldestAge = if (childrenCount != "0") {
+            when (ageGroup) {
+                "25–34 лет" -> "1-3"
+                "35–44 лет" -> "3-7"
+                "45–54 лет" -> "11-15"
+                "55–64 лет" -> "больше 18"
+                else -> "3-7"
+            }
+        } else "нет ребёнка"
+
+        // 20. Youngest child's gender
+        val youngestGender = if (childrenCount == "2" || childrenCount == "3" || childrenCount == "больше 3") "женский" else "нет ребёнка"
+
+        // 21. Youngest child's age
+        val youngestAge = if (childrenCount == "2" || childrenCount == "3" || childrenCount == "больше 3") {
+            when (ageGroup) {
+                "25–34 лет" -> "0-1"
+                "35–44 лет" -> "1-3"
+                "45–54 лет" -> "7-11"
+                "55–64 лет" -> "15-18"
+                else -> "1-3"
+            }
+        } else "нет ребёнка"
+
+        // 22. Father's age
+        val fatherAge = when (ageGroup) {
+            "15–24 лет" -> "45–54 лет"
+            "25–34 лет" -> "55–64 лет"
+            else -> "65+ лет"
+        }
+
+        // 23. Mother's age
+        val motherAge = when (ageGroup) {
+            "15–24 лет" -> "45–54 лет"
+            "25–34 лет" -> "55–64 лет"
+            else -> "65+ лет"
+        }
+
+        // 24. Mother-in-law's age
+        val motherInLawAge = if (marital != "нет") motherAge else "нет"
+
+        // 25. Father-in-law's age
+        val fatherInLawAge = if (marital != "нет") fatherAge else "нет"
+
+        // 26. Hobbies
+        val hobby = when {
+            histLower.contains("shoes") || idLower.contains("hiker") || histLower.contains("backpack") -> "Туризм, хайкинг и альпинизм"
+            histLower.contains("yoga") || histLower.contains("mat") -> "Йога и пилатес"
+            histLower.contains("coffee") -> "Готовка (кулинария, выпечка, бариста)"
+            idLower.contains("designer") -> "Рисование (живопись, скетчинг, цифровая графика)"
+            else -> "Чтение (художественная литература, нон-фикшн)"
+        }
+
+        // 27. Sport interests
+        val sport = when {
+            idLower.contains("developer") -> "киберспорт; шахматы; го"
+            idLower.contains("hiker") || histLower.contains("backpack") -> "маунтинбайк; сноубординг; трековый велоспорт"
+            histLower.contains("shoes") || histLower.contains("yoga") -> "бег; спринт; марафон; плавание"
+            else -> "фигурное катание; плавание"
+        }
+
+        // 28. Recreation interests
+        val recreation = when {
+            idLower.contains("hiker") || histLower.contains("backpack") -> "пешие походы; трекинг; альпинизм; кемпинг"
+            idLower.contains("designer") -> "арт-туризм; посещение музеев; обзорные экскурсии"
+            isFemale -> "SPA-процедуры; термальные источники; пляжный отдых"
+            else -> "загородный отдых на даче; киномарафоны"
+        }
+
+        // 29. Movie interests
+        val movie = when {
+            idLower.contains("developer") -> "фантастика; фэнтези; детектив; киберпанк; космическая опера"
+            idLower.contains("designer") -> "драма; биография; документальное кино; анимация"
+            else -> "комедия; драма; приключения; семейный фильм"
+        }
+
+        // 30. Music interests
+        val music = when {
+            idLower.contains("developer") -> "электронная музыка; техно; эмбиент; чиллаут; синтвейв"
+            idLower.contains("designer") -> "инди-рок; альтернативный рок; джаз; блюз"
+            else -> "Поп-музыка; чиллаут; неоклассика; диско"
+        }
+
+        // 31. Science interests
+        val science = when {
+            idLower.contains("developer") || idLower.contains("engineer") -> "информатика; искусственный интеллект; теоретическая физика; математика"
+            idLower.contains("designer") -> "архитектура; культурология; искусствоведение; эстетика"
+            else -> "социальная психология; экология; лингвистика"
+        }
+
+        // 32. Diseases
+        val disease = when {
+            ageGroup == "45–54 лет" -> "остеохондроз; варикозное расширение вен; гипертоническая болезнь"
+            isFemale -> "мигрень; головная боль напряжения; генерализованное тревожное расстройство"
+            else -> "острая респираторная вирусная инфекция (ОРВИ); мигрень"
+        }
+
+        // 33. Computer games
+        val game = when {
+            idLower.contains("developer") -> "стратегия в реальном времени (RTS); пошаговая стратегия (TBS); глобальная стратегия (Grand Strategy); ролевая игра (RPG)"
+            idLower.contains("designer") -> "песочница (Sandbox); головоломка; приключения; симулятор жизни"
+            else -> "головоломка; визуальная новелла; симулятор жизни"
+        }
+
+        return """
+            Пол: $gender
+            Возраст пользователя: $ageGroup
+            Доход: $income
+            Вероисповедание: $religion
+            Количество детей: $childrenCount
+            Семейное положение: $marital
+            Возраст партнёра/мужа/жены пользователя: $partnerAge
+            Животные: $pets
+            Профессия: $profession
+            Месяц дня рождения: $birthMonth
+            Месяц дня рождения партнёра/мужа/жены: $partnerBirthMonth
+            Месяц дня рождения отца: $fatherBirthMonth
+            Месяц дня рождения матери: $motherBirthMonth
+            Месяц дня рождения старшего ребёнка: $eldestBirthMonth
+            Месяц дня рождения младшего ребёнка: $youngestBirthMonth
+            Месяц дня рождения свекрови/тёщи: $motherInLawBirthMonth
+            Месяц дня рождения свёкра/тестя: $fatherInLawBirthMonth
+            Пол старшего ребёнка: $eldestGender
+            Возраст старшего ребёнка: $eldestAge
+            Пол младшего ребёнка: $youngestGender
+            Возраст младшего ребёнка: $youngestAge
+            Возраст отца: $fatherAge
+            Возраст матери: $motherAge
+            Возраст свекрови/тещи: $motherInLawAge
+            Возраст свёкра/тестя: $fatherInLawAge
+            Хобби: $hobby
+            Интересы в видах спорта: $sport
+            Интересы в видах отдыха: $recreation
+            Интересы в кино: $movie
+            Интересы в музыке: $music
+            Интересы в науке: $science
+            Заболевания: $disease
+            Интересы в компьютерных играх: $game
+        """.trimIndent()
+    }
+
+    fun generateProductHeuristics(
+        identity: String,
+        history: String,
+        contextText: String,
+        favorites: String,
+        viewed: String,
+        actions: String
+    ): String {
+        val idLower = identity.lowercase()
+        val histLower = history.lowercase()
+        
+        return when {
+            idLower.contains("alice") -> {
+                """
+                - Товар: Умный зонт (Smart Umbrella)
+                - Товар: Сапоги от дождя (Rain Boots)
+                - Товар: Премиальный коврик для йоги (Yoga mat)
+                - Товар: Водонепроницаемый городской рюкзак (Waterproof Backpack)
+                - Товар: Экологичная хлопковая футболка (Cotton Tee)
+                """.trimIndent()
+            }
+            idLower.contains("bob") -> {
+                """
+                - Товар: Трекинговые кроссовки повышенной прочности (Trail run shoes)
+                - Товар: Ветрозащитная шляпа (Hat)
+                - Товар: Легкий спальный мешок для кемпинга (Sleeping bag)
+                - Товар: Многофункциональная бутылка для воды (Water bottle)
+                - Товар: Налобный светодиодный фонарь
+                """.trimIndent()
+            }
+            idLower.contains("charlie") -> {
+                """
+                - Товар: Беспроводные наушники с активным шумоподавлением (Earbuds)
+                - Товар: Эргономичная беспроводная мышь
+                - Товар: Кофейные зерна свежей обжарки (Specialty Coffee)
+                - Товар: Уютная хлопковая толстовка с капюшоном (Warm Hoodie)
+                - Товар: Механическая программируемая клавиатура
+                """.trimIndent()
+            }
+            else -> {
+                val predictedItems = mutableListOf<String>()
+                
+                if (histLower.contains("shoes") || histLower.contains("shoes") || histLower.contains("кросс")) {
+                    predictedItems.add("Профессиональные беговые кроссовки")
+                }
+                if (idLower.contains("dog") || histLower.contains("dog")) {
+                    predictedItems.add("Автоматическая кормушка для собак")
+                    predictedItems.add("Прочный поводок-рулетка")
+                }
+                if (idLower.contains("cat") || histLower.contains("cat")) {
+                    predictedItems.add("Интерактивная лазерная игрушка для кошек")
+                    predictedItems.add("Премиальный гипоаллергенный корм")
+                }
+                if (idLower.contains("child") || idLower.contains("children") || idLower.contains("детей")) {
+                    predictedItems.add("Развивающие деревянные конструкторы")
+                    predictedItems.add("Детский игровой планшет с родительским контролем")
+                }
+                if (histLower.contains("coffee") || histLower.contains("кофе")) {
+                    predictedItems.add("Кофемашина капсульного типа")
+                    predictedItems.add("Набор керамических кофейных чашек")
+                }
+                
+                predictedItems.add("Умный термос с индикатором температуры")
+                predictedItems.add("Портативное зарядное устройство (Powerbank 20000mAh)")
+                
+                predictedItems.joinToString("\n") { "- Товар: $it" }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen() {
@@ -919,14 +1402,27 @@ fun MainScreen() {
     var favoritedItems by remember { mutableStateOf(PRESETS[0].favoritedItems) }
     var userActions by remember { mutableStateOf(PRESETS[0].userActions) }
     
+    // Assumptions State
+    var userAssumptions by remember { mutableStateOf("") }
+    var productAssumptions by remember { mutableStateOf("") }
+    var isGeneratingUserAssumptions by remember { mutableStateOf(false) }
+    var isGeneratingProductAssumptions by remember { mutableStateOf(false) }
+    
     // RAG / CSV State
     var csvFileName by remember { mutableStateOf<String?>(null) }
     var csvFileSize by remember { mutableStateOf<Long>(0L) }
     var csvContent by remember { mutableStateOf<String>("") }
     var extractedKeywords by remember { mutableStateOf<List<String>>(emptyList()) }
     var retrievedCategories by remember { mutableStateOf<List<String>>(emptyList()) }
-    var baselineCritique by remember { mutableStateOf("") }
-    var rerankedCritique by remember { mutableStateOf("") }
+    var arbitraryQuestion by remember { mutableStateOf("") }
+    var arbitraryAnswer by remember { mutableStateOf("") }
+    var isGeneratingArbitrary by remember { mutableStateOf(false) }
+    
+    var ndcgCountText by remember { mutableStateOf("5") }
+    var isNdcgComparing by remember { mutableStateOf(false) }
+    var ndcgCompareResults by remember { mutableStateOf<List<ItemNdcgRating>?>(null) }
+    var baselineNdcg by remember { mutableStateOf(0.0) }
+    var rerankedNdcg by remember { mutableStateOf(0.0) }
     
     var selectedPresetIndex by remember { mutableStateOf(0) }
     
@@ -950,7 +1446,7 @@ fun MainScreen() {
     }
     
     // Recalculate embeddings and word sets for each input field when they change
-    LaunchedEffect(userIdentity, purchaseHistory, externalContext, favoritedItems, viewedItems, userActions) {
+    LaunchedEffect(userIdentity, purchaseHistory, externalContext, favoritedItems, viewedItems, userActions, userAssumptions, productAssumptions) {
         val map = mutableMapOf<String, FieldData>()
         val fields = listOf(
             "User Identity" to userIdentity,
@@ -958,7 +1454,9 @@ fun MainScreen() {
             "External Context" to externalContext,
             "Favorited Items" to favoritedItems,
             "Viewed Items" to viewedItems,
-            "User Actions" to userActions
+            "User Actions" to userActions,
+            "User Character Assumptions" to userAssumptions,
+            "Target Product Assumptions" to productAssumptions
         )
         for ((name, text) in fields) {
             val words = EmbeddingHelper.getWordList(text).toSet()
@@ -1005,20 +1503,41 @@ fun MainScreen() {
         val updatedLines = ragLinesList.map { line ->
             var maxCos = -1.0f
             var totalWordMatches = 0
+            var userAssumptionsCos = 0.0f
+            var userAssumptionsWordMatches = 0
+            var productAssumptionsCos = 0.0f
+            var productAssumptionsWordMatches = 0
             
-            fieldsDataMap.values.forEach { field ->
+            fieldsDataMap.forEach { (fieldName, field) ->
                 val sim = EmbeddingHelper.cosineSimilarity(line.embedding, field.embedding)
                 if (sim > maxCos) {
                     maxCos = sim
                 }
                 val matches = line.words.intersect(field.words).size
                 totalWordMatches += matches
+                
+                if (fieldName == "User Character Assumptions") {
+                    userAssumptionsCos = sim
+                    userAssumptionsWordMatches = matches
+                } else if (fieldName == "Target Product Assumptions") {
+                    productAssumptionsCos = sim
+                    productAssumptionsWordMatches = matches
+                }
             }
+            
+            // Чтобы косинусные расстояния и совпадения слов были одинаковы по важности, 
+            // даем совпадениям слов больший вес (в среднем совпадает 5-15 слов, что даст 500-1500 баллов, как и косинус).
+            val combinedScore = (maxCos * 1000f) + 
+                                (totalWordMatches * 100f) + 
+                                (userAssumptionsCos * 500f) + 
+                                (userAssumptionsWordMatches * 50f) +
+                                (productAssumptionsCos * 500f) + 
+                                (productAssumptionsWordMatches * 50f)
             
             line.copy(
                 cosineMax = maxCos,
                 wordMatchesCount = totalWordMatches,
-                combinedScore = maxCos * 1000f + totalWordMatches * 10f
+                combinedScore = combinedScore
             )
         }
         
@@ -1124,6 +1643,8 @@ fun MainScreen() {
                     "Viewed Items" -> viewedItems = content
                     "Favorited Items" -> favoritedItems = content
                     "User Actions" -> userActions = content
+                    "User Character Assumptions" -> userAssumptions = content
+                    "Target Product Assumptions" -> productAssumptions = content
                 }
                 Toast.makeText(context, "Loaded $target from file!", Toast.LENGTH_SHORT).show()
             } else {
@@ -1179,10 +1700,15 @@ fun MainScreen() {
                     viewedItems = PRESETS[index].viewedItems
                     favoritedItems = PRESETS[index].favoritedItems
                     userActions = PRESETS[index].userActions
+                    userAssumptions = ""
+                    productAssumptions = ""
                     // Reset results to prompt user to rank again
                     rankedResults = emptyList()
-                    baselineCritique = ""
-                    rerankedCritique = ""
+                    arbitraryQuestion = ""
+                    arbitraryAnswer = ""
+                    ndcgCompareResults = null
+                    baselineNdcg = 0.0
+                    rerankedNdcg = 0.0
                     Toast.makeText(context, "Loaded scenario: ${PRESETS[index].name}", Toast.LENGTH_SHORT).show()
                 }
             )
@@ -1202,12 +1728,12 @@ fun MainScreen() {
                 }
             )
             
-            // 2-Column Inputs Grid with the remaining 5 context fields
+            // 2-Column Inputs Grid with the remaining 6 context fields
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Box(modifier = Modifier.weight(1f)) {
                     InputCard(
                         title = "User Identity",
                         value = userIdentity,
@@ -1221,6 +1747,31 @@ fun MainScreen() {
                             textFileInputLauncher.launch("text/*")
                         }
                     )
+                }
+                Box(modifier = Modifier.weight(1f)) {
+                    InputCard(
+                        title = "Purchase History",
+                        value = purchaseHistory,
+                        onEdit = {
+                            editingField = "Purchase History"
+                            editingValue = purchaseHistory
+                        },
+                        onPaste = { handlePaste("Purchase History") { purchaseHistory = it } },
+                        onLoadFile = {
+                            activeInputFileTarget = "Purchase History"
+                            textFileInputLauncher.launch("text/*")
+                        }
+                    )
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(modifier = Modifier.weight(1f)) {
                     InputCard(
                         title = "External Context",
                         value = externalContext,
@@ -1234,6 +1785,31 @@ fun MainScreen() {
                             textFileInputLauncher.launch("text/*")
                         }
                     )
+                }
+                Box(modifier = Modifier.weight(1f)) {
+                    InputCard(
+                        title = "Favorited Items",
+                        value = favoritedItems,
+                        onEdit = {
+                            editingField = "Favorited Items"
+                            editingValue = favoritedItems
+                        },
+                        onPaste = { handlePaste("Favorited Items") { favoritedItems = it } },
+                        onLoadFile = {
+                            activeInputFileTarget = "Favorited Items"
+                            textFileInputLauncher.launch("text/*")
+                        }
+                    )
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(modifier = Modifier.weight(1f)) {
                     InputCard(
                         title = "Viewed Items",
                         value = viewedItems,
@@ -1248,33 +1824,7 @@ fun MainScreen() {
                         }
                     )
                 }
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    InputCard(
-                        title = "Purchase History",
-                        value = purchaseHistory,
-                        onEdit = {
-                            editingField = "Purchase History"
-                            editingValue = purchaseHistory
-                        },
-                        onPaste = { handlePaste("Purchase History") { purchaseHistory = it } },
-                        onLoadFile = {
-                            activeInputFileTarget = "Purchase History"
-                            textFileInputLauncher.launch("text/*")
-                        }
-                    )
-                    InputCard(
-                        title = "Favorited Items",
-                        value = favoritedItems,
-                        onEdit = {
-                            editingField = "Favorited Items"
-                            editingValue = favoritedItems
-                        },
-                        onPaste = { handlePaste("Favorited Items") { favoritedItems = it } },
-                        onLoadFile = {
-                            activeInputFileTarget = "Favorited Items"
-                            textFileInputLauncher.launch("text/*")
-                        }
-                    )
+                Box(modifier = Modifier.weight(1f)) {
                     InputCard(
                         title = "User Actions",
                         value = userActions,
@@ -1288,6 +1838,117 @@ fun MainScreen() {
                             textFileInputLauncher.launch("text/*")
                         }
                     )
+                }
+            }
+
+            val generateUserAssumptions = {
+                coroutineScope.launch {
+                    isGeneratingUserAssumptions = true
+                    try {
+                        val ragCategoriesText = retrievedCategories.joinToString(", ")
+                        val ragContextText = topRagLines.joinToString("\n") { "- ${it.originalLine}" }
+                        
+                        val text = generateWithGeminiNanoAutoCompress(
+                            identity = userIdentity,
+                            history = purchaseHistory,
+                            context = externalContext,
+                            viewed = viewedItems,
+                            favorited = favoritedItems,
+                            actions = userActions,
+                            ragCategoriesText = ragCategoriesText,
+                            ragContextText = ragContextText,
+                            isLoraActive = isLoraActive,
+                            loraSpecialization = loraSpecialization,
+                            loraRank = loraRank,
+                            loraAlpha = loraAlpha,
+                            promptType = "user_assumptions",
+                            onStatusUpdate = { }
+                        )
+                        userAssumptions = text
+                        Toast.makeText(context, "Характеристики сгенерированы на Gemini Nano!", Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        userAssumptions = AssumptionGenerators.generateUserHeuristics(
+                            userIdentity, purchaseHistory, externalContext, favoritedItems, viewedItems, userActions
+                        )
+                        Toast.makeText(context, "Использованы интеллектуальные правила (fallback)!", Toast.LENGTH_SHORT).show()
+                    } finally {
+                        isGeneratingUserAssumptions = false
+                    }
+                }
+            }
+
+            val generateProductAssumptions = {
+                coroutineScope.launch {
+                    isGeneratingProductAssumptions = true
+                    try {
+                        val ragCategoriesText = retrievedCategories.joinToString(", ")
+                        val ragContextText = topRagLines.joinToString("\n") { "- ${it.originalLine}" }
+                        
+                        val text = generateWithGeminiNanoAutoCompress(
+                            identity = userIdentity,
+                            history = purchaseHistory,
+                            context = externalContext,
+                            viewed = viewedItems,
+                            favorited = favoritedItems,
+                            actions = userActions,
+                            ragCategoriesText = ragCategoriesText,
+                            ragContextText = ragContextText,
+                            isLoraActive = isLoraActive,
+                            loraSpecialization = loraSpecialization,
+                            loraRank = loraRank,
+                            loraAlpha = loraAlpha,
+                            promptType = "product_assumptions",
+                            onStatusUpdate = { }
+                        )
+                        productAssumptions = text
+                        Toast.makeText(context, "Предположения о конкретных товарах сгенерированы на Gemini Nano!", Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        productAssumptions = AssumptionGenerators.generateProductHeuristics(
+                            userIdentity, purchaseHistory, externalContext, favoritedItems, viewedItems, userActions
+                        )
+                        Toast.makeText(context, "Использованы интеллектуальные правила (fallback)!", Toast.LENGTH_SHORT).show()
+                    } finally {
+                        isGeneratingProductAssumptions = false
+                    }
+                }
+            }
+
+            val askArbitraryQuestion = {
+                coroutineScope.launch {
+                    if (arbitraryQuestion.isBlank()) return@launch
+                    isGeneratingArbitrary = true
+                    try {
+                        val ragCategoriesText = retrievedCategories.joinToString(", ")
+                        val ragContextText = topRagLines.joinToString("\n") { "- ${it.originalLine}" }
+                        
+                        val text = generateWithGeminiNanoAutoCompress(
+                            identity = userIdentity,
+                            history = purchaseHistory,
+                            context = externalContext,
+                            viewed = viewedItems,
+                            favorited = favoritedItems,
+                            actions = userActions,
+                            ragCategoriesText = ragCategoriesText,
+                            ragContextText = ragContextText,
+                            isLoraActive = isLoraActive,
+                            loraSpecialization = loraSpecialization,
+                            loraRank = loraRank,
+                            loraAlpha = loraAlpha,
+                            promptType = "qa",
+                            extraInput = arbitraryQuestion,
+                            onStatusUpdate = { }
+                        )
+                        arbitraryAnswer = text
+                        Toast.makeText(context, "Ответ получен от Gemini Nano!", Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        arbitraryAnswer = "Ошибка при генерации ответа: ${e.message}\nУбедитесь, что модель Gemini Nano установлена и готова к работе."
+                        Toast.makeText(context, "Не удалось выполнить запрос локально!", Toast.LENGTH_LONG).show()
+                    } finally {
+                        isGeneratingArbitrary = false
+                    }
                 }
             }
             
@@ -1348,6 +2009,63 @@ fun MainScreen() {
                 onShowAdvancedChange = { showAdvancedLoraParams = it }
             )
             
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            // Stack Assumption Cards vertically
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                AssumptionCard(
+                    title = "User Assumptions",
+                    value = userAssumptions,
+                    placeholder = "Нет предположений. Нажмите GENERATE NANO или вставьте данные.",
+                    isGenerating = isGeneratingUserAssumptions,
+                    onEdit = {
+                        editingField = "User Character Assumptions"
+                        editingValue = userAssumptions
+                    },
+                    onPaste = { handlePaste("User Character Assumptions") { userAssumptions = it } },
+                    onLoadFile = {
+                        activeInputFileTarget = "User Character Assumptions"
+                        textFileInputLauncher.launch("text/*")
+                    },
+                    onGenerate = {
+                        generateUserAssumptions()
+                    }
+                )
+                AssumptionCard(
+                    title = "Product Assumptions",
+                    value = productAssumptions,
+                    placeholder = "Нет предположений. Нажмите GENERATE NANO или вставьте данные.",
+                    isGenerating = isGeneratingProductAssumptions,
+                    onEdit = {
+                        editingField = "Target Product Assumptions"
+                        editingValue = productAssumptions
+                    },
+                    onPaste = { handlePaste("Target Product Assumptions") { productAssumptions = it } },
+                    onLoadFile = {
+                        activeInputFileTarget = "Target Product Assumptions"
+                        textFileInputLauncher.launch("text/*")
+                    },
+                    onGenerate = {
+                        generateProductAssumptions()
+                    }
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            GeminiNanoQaCard(
+                question = arbitraryQuestion,
+                onQuestionChange = { arbitraryQuestion = it },
+                answer = arbitraryAnswer,
+                isGenerating = isGeneratingArbitrary,
+                onAsk = { askArbitraryQuestion() }
+            )
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
             // SORT & VIEW PROMPT BUTTONS (Horizontal Row)
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1397,20 +2115,7 @@ fun MainScreen() {
                                 rankedResults = results
                                 isRealOnDeviceSdkActive = wasRealSdk
                                 
-                                baselineCritique = generateBaselineCritique(
-                                    identity = userIdentity,
-                                    context = externalContext,
-                                    initialItems = splitItemsText(itemsToRank)
-                                )
-                                
-                                rerankedCritique = generateRerankedCritique(
-                                    identity = userIdentity,
-                                    context = externalContext,
-                                    sortedItems = rankedResults,
-                                    isLoraActive = isLoraActive,
-                                    loraSpecialization = loraSpecialization,
-                                    hasRagCategories = retrievedCategories.isNotEmpty()
-                                )
+
                             } catch (e: Exception) {
                                 e.printStackTrace()
                                 lastErrorDetail = "Ошибка выполнения: ${e.localizedMessage ?: e.toString()}"
@@ -1798,8 +2503,6 @@ fun MainScreen() {
                 isLoading = isLoading,
                 loadingPhase = loadingPhase,
                 results = rankedResults,
-                baselineCritique = baselineCritique,
-                rerankedCritique = rerankedCritique,
                 isRealSdk = isRealOnDeviceSdkActive,
                 errorDetail = lastErrorDetail,
                 onCopyClick = {
@@ -1839,6 +2542,8 @@ fun MainScreen() {
                         "Viewed Items" -> viewedItems = updated
                         "Favorited Items" -> favoritedItems = updated
                         "User Actions" -> userActions = updated
+                        "User Character Assumptions" -> userAssumptions = updated
+                        "Target Product Assumptions" -> productAssumptions = updated
                     }
                     editingField = null
                 }
@@ -2074,12 +2779,145 @@ fun InputCard(
 }
 
 @Composable
+fun AssumptionCard(
+    title: String,
+    value: String,
+    placeholder: String,
+    isGenerating: Boolean,
+    onEdit: () -> Unit,
+    onPaste: () -> Unit,
+    onLoadFile: () -> Unit,
+    onGenerate: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            text = title.uppercase(),
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontWeight = FontWeight.Bold,
+                color = SleekLabel,
+                fontSize = 11.sp,
+                letterSpacing = 0.5.sp
+            ),
+            modifier = Modifier.padding(horizontal = 4.dp)
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 110.dp)
+                .background(SleekSurfaceVariant, RoundedCornerShape(16.dp))
+                .border(1.dp, SleekOutline, RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(16.dp))
+                .clickable(enabled = !isGenerating) { onEdit() }
+                .padding(12.dp)
+        ) {
+            if (isGenerating) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = SleekPrimary
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Генерация Nano...",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = SleekPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    )
+                }
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = if (value.isEmpty()) placeholder else value,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = if (value.isEmpty()) SleekOnBackground.copy(alpha = 0.4f) else SleekOnBackground.copy(alpha = 0.8f),
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp,
+                            fontStyle = if (value.isEmpty()) FontStyle.Italic else FontStyle.Normal
+                        ),
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    
+                    Spacer(modifier = Modifier.height(10.dp))
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "📁 LOAD FILE",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = SleekPrimary,
+                                    fontSize = 10.sp
+                                ),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .clickable { onLoadFile() }
+                                    .padding(4.dp)
+                            )
+                            Text(
+                                text = "📋 PASTE",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = SleekPrimary,
+                                    fontSize = 10.sp
+                                ),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .clickable { onPaste() }
+                                    .padding(4.dp)
+                            )
+                        }
+                        
+                        androidx.compose.material3.Button(
+                            onClick = onGenerate,
+                            modifier = Modifier
+                                .height(32.dp),
+                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                containerColor = SleekPrimary,
+                                contentColor = Color.White
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp)
+                        ) {
+                            Text(
+                                text = "✨ GENERATE NANO",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.sp,
+                                    letterSpacing = 0.5.sp
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun OutputContainer(
     isLoading: Boolean,
     loadingPhase: String,
     results: List<ScoredItem>,
-    baselineCritique: String,
-    rerankedCritique: String,
     isRealSdk: Boolean = false,
     errorDetail: String? = null,
     onCopyClick: () -> Unit,
@@ -2331,87 +3169,6 @@ fun OutputContainer(
                                 fontFamily = FontFamily.Monospace
                             )
                         )
-                        
-                        if (baselineCritique.isNotEmpty() || rerankedCritique.isNotEmpty()) {
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(SleekOutlineVariant))
-                            Spacer(modifier = Modifier.height(12.dp))
-                            
-                            Column(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                if (baselineCritique.isNotEmpty()) {
-                                    Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .background(Color(0xFFFFEBEE).copy(alpha = 0.4f), RoundedCornerShape(16.dp))
-                                            .border(1.dp, Color(0xFFFFCDD2).copy(alpha = 0.6f), RoundedCornerShape(16.dp))
-                                            .padding(14.dp),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        Row(
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text("📉", fontSize = 16.sp)
-                                            Text(
-                                                text = "GEMINI NANO: BASELINE CATALOG CRITIQUE",
-                                                style = MaterialTheme.typography.labelSmall.copy(
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = Color(0xFFC62828),
-                                                    fontSize = 11.sp,
-                                                    letterSpacing = 0.5.sp
-                                                )
-                                            )
-                                        }
-                                        Text(
-                                            text = baselineCritique,
-                                            style = MaterialTheme.typography.bodySmall.copy(
-                                                color = SleekOnBackground.copy(alpha = 0.85f),
-                                                fontSize = 11.5.sp,
-                                                lineHeight = 16.sp
-                                            )
-                                        )
-                                    }
-                                }
-                                
-                                if (rerankedCritique.isNotEmpty()) {
-                                    Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .background(Color(0xFFE8F5E9).copy(alpha = 0.4f), RoundedCornerShape(16.dp))
-                                            .border(1.dp, Color(0xFFC8E6C9).copy(alpha = 0.6f), RoundedCornerShape(16.dp))
-                                            .padding(14.dp),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        Row(
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text("📈", fontSize = 16.sp)
-                                            Text(
-                                                text = "GEMINI NANO: RE-RANKED OUTPUT OPTIMIZATION",
-                                                style = MaterialTheme.typography.labelSmall.copy(
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = Color(0xFF2E7D32),
-                                                    fontSize = 11.sp,
-                                                    letterSpacing = 0.5.sp
-                                                )
-                                            )
-                                        }
-                                        Text(
-                                            text = rerankedCritique,
-                                            style = MaterialTheme.typography.bodySmall.copy(
-                                                color = SleekOnBackground.copy(alpha = 0.85f),
-                                                fontSize = 11.5.sp,
-                                                lineHeight = 16.sp
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -3219,6 +3976,180 @@ fun LoraAdapterCard(
                             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun GeminiNanoQaCard(
+    question: String,
+    onQuestionChange: (String) -> Unit,
+    answer: String,
+    isGenerating: Boolean,
+    onAsk: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = SleekSurfaceVariant
+        ),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, SleekOutline.copy(alpha = 0.5f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "🤖 Gemini Nano Q&A",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = SleekPrimary,
+                        letterSpacing = 0.5.sp
+                    )
+                )
+                Box(
+                    modifier = Modifier
+                        .background(SleekPrimary.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = "LOCAL ON-DEVICE",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = SleekPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 8.sp
+                        )
+                    )
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(4.dp))
+            
+            Text(
+                text = "Задайте произвольный вопрос Gemini Nano на основе текущего контекста и RAG/LoRA параметров.",
+                style = MaterialTheme.typography.bodySmall.copy(
+                    color = SleekOnBackground.copy(alpha = 0.6f),
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
+            )
+            
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            // Question Input Field
+            androidx.compose.material3.OutlinedTextField(
+                value = question,
+                onValueChange = onQuestionChange,
+                placeholder = {
+                    Text(
+                        text = "Например: Каковы основные интересы этого пользователя? или Какой товар ему предложить?",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = SleekOnBackground.copy(alpha = 0.4f),
+                            fontSize = 12.sp
+                        )
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+                textStyle = MaterialTheme.typography.bodySmall.copy(
+                    color = SleekOnBackground,
+                    fontSize = 12.sp
+                ),
+                maxLines = 2,
+                shape = RoundedCornerShape(8.dp),
+                colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = SleekOnBackground,
+                    unfocusedTextColor = SleekOnBackground,
+                    focusedContainerColor = SleekBackground,
+                    unfocusedContainerColor = SleekBackground,
+                    focusedBorderColor = SleekPrimary,
+                    unfocusedBorderColor = SleekOutline,
+                    cursorColor = SleekPrimary
+                )
+            )
+            
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            // Action Button
+            androidx.compose.material3.Button(
+                onClick = onAsk,
+                enabled = question.isNotBlank() && !isGenerating,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(36.dp),
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = SleekPrimary,
+                    contentColor = Color.White,
+                    disabledContainerColor = SleekOutline,
+                    disabledContentColor = SleekOnBackground.copy(alpha = 0.4f)
+                ),
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                if (isGenerating) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        color = Color.White,
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "ГЕНЕРАЦИЯ ОТВЕТА...",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                    )
+                } else {
+                    Text(
+                        text = "ASK GEMINI NANO",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            letterSpacing = 0.5.sp
+                        )
+                    )
+                }
+            }
+            
+            if (answer.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                Text(
+                    text = "Ответ ассистента:",
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = SleekOnBackground.copy(alpha = 0.9f)
+                    )
+                )
+                
+                Spacer(modifier = Modifier.height(6.dp))
+                
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(SleekBackground, RoundedCornerShape(8.dp))
+                        .border(1.dp, SleekOutline.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                        .padding(12.dp)
+                ) {
+                    Text(
+                        text = answer,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = SleekOnBackground.copy(alpha = 0.85f),
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp
+                        )
+                    )
                 }
             }
         }

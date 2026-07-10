@@ -641,3 +641,195 @@ suspend fun rerankWithSummarizationFallback(
         }
     }
 }
+
+suspend fun generateWithGeminiNanoAutoCompress(
+    identity: String,
+    history: String,
+    context: String,
+    viewed: String,
+    favorited: String,
+    actions: String,
+    ragCategoriesText: String,
+    ragContextText: String,
+    isLoraActive: Boolean,
+    loraSpecialization: String,
+    loraRank: Int,
+    loraAlpha: Int,
+    promptType: String, // "user_assumptions" | "product_assumptions" | "qa"
+    extraInput: String = "", // Used for Q&A question
+    onStatusUpdate: (String) -> Unit
+): String {
+    val generativeModel = com.google.mlkit.genai.prompt.Generation.getClient()
+    
+    // First, let's try direct generation with local text compaction
+    // We will do a multi-stage approach to ensure Gemini Nano never fails!
+    
+    // Stage 1: Fast local compaction (no network/local model summarization overhead)
+    var useSummarization = false
+    var currentIdentity = identity
+    var currentHistory = history
+    var currentContext = context
+    var currentViewed = viewed
+    var currentFavorited = favorited
+    var currentActions = actions
+    var currentRagCategories = ragCategoriesText
+    var currentRagContext = ragContextText
+    
+    onStatusUpdate("Оптимизация контекста для Gemini Nano...")
+    
+    for (attempt in 1..3) {
+        val loraInfo = if (isLoraActive) "Активный адаптер LoRA: $loraSpecialization (Rank=$loraRank, Alpha=$loraAlpha)" else ""
+        
+        val contextBlock = if (useSummarization) {
+            // Stage 2: If we are on attempt 2 or 3, or if previous failed, we use summarized fields
+            onStatusUpdate("Запуск суммаризации полей (размер превышен)...")
+            val sumIdentity = try { summarizeField(generativeModel, "User Identity", currentIdentity, onStatusUpdate) } catch (e: Exception) { truncateWordsToLast(currentIdentity, 30) }
+            val sumHistory = try { summarizeField(generativeModel, "Purchase History", currentHistory, onStatusUpdate) } catch (e: Exception) { truncateWordsToLast(currentHistory, 30) }
+            val sumContext = try { summarizeField(generativeModel, "External Context", currentContext, onStatusUpdate) } catch (e: Exception) { truncateWordsToLast(currentContext, 20) }
+            val sumViewed = try { summarizeField(generativeModel, "Viewed Items", currentViewed, onStatusUpdate) } catch (e: Exception) { truncateWordsToLast(currentViewed, 20) }
+            val sumFavorited = try { summarizeField(generativeModel, "Favorited Items", currentFavorited, onStatusUpdate) } catch (e: Exception) { truncateWordsToLast(currentFavorited, 20) }
+            val sumActions = try { summarizeField(generativeModel, "User Actions", currentActions, onStatusUpdate) } catch (e: Exception) { truncateWordsToLast(currentActions, 30) }
+            
+            val ragLines = currentRagContext.split("\n")
+            val sumRagContext = if (ragLines.size > 2) {
+                ragLines.take(2).joinToString("\n")
+            } else {
+                currentRagContext
+            }
+            val sumRagContextFinal = try { summarizeField(generativeModel, "RAG Context", sumRagContext, onStatusUpdate) } catch (e: Exception) { truncateWordsToLast(sumRagContext, 40) }
+            
+            """
+                User Identity Profile: $sumIdentity
+                Historic Purchases: $sumHistory
+                Current Context/Environment: $sumContext
+                Recently Viewed: $sumViewed
+                Favorites: $sumFavorited
+                User Actions: $sumActions
+                RAG retrieved demographics: $currentRagCategories
+                ${if (sumRagContextFinal.isNotEmpty()) "RAG retrieved domain-specific knowledge:\n$sumRagContextFinal" else ""}
+                ${if (loraInfo.isNotEmpty()) "Active Low-Rank Adapter: $loraInfo" else ""}
+            """.trimIndent()
+        } else {
+            // Fast local truncation for a compact 100% working prompt first!
+            val compIdentity = truncateWordsToLast(currentIdentity, 50)
+            val compHistory = truncateWordsToLast(currentHistory, 50)
+            val compContext = truncateWordsToLast(currentContext, 30)
+            val compViewed = truncateWordsToLast(currentViewed, 40)
+            val compFavorited = truncateWordsToLast(currentFavorited, 40)
+            val compActions = truncateWordsToLast(currentActions, 50)
+            
+            val ragLines = currentRagContext.split("\n")
+            val compRagContext = if (ragLines.size > 2) {
+                ragLines.take(2).joinToString("\n")
+            } else {
+                currentRagContext
+            }
+            val compRagContextFinal = truncateWordsToLast(compRagContext, 80)
+            
+            """
+                User Identity Profile: $compIdentity
+                Historic Purchases: $compHistory
+                Current Context/Environment: $compContext
+                Recently Viewed: $compViewed
+                Favorites: $compFavorited
+                User Actions: $compActions
+                RAG retrieved demographics: $currentRagCategories
+                ${if (compRagContextFinal.isNotEmpty()) "RAG retrieved domain-specific knowledge:\n$compRagContextFinal" else ""}
+                ${if (loraInfo.isNotEmpty()) "Active Low-Rank Adapter: $loraInfo" else ""}
+            """.trimIndent()
+        }
+        
+        val prompt = when (promptType) {
+            "user_assumptions" -> {
+                """
+                    Вы - профессиональный аналитик профилей пользователей. На основе следующих входных данных:
+                    $contextBlock
+                    
+                    Пожалуйста, предположите характеристики этого пользователя по следующим пунктам. 
+                    Отвечайте на РУССКОМ языке. Выведите характеристики БЕЗ какой-либо нумерации (БЕЗ "1)", "2)" и т.д.), строго в виде: "название характеристики: одно или несколько значений характеристики" (например, "Интересы в музыке: Поп-музыка, классическая музыка"). Вы можете указывать несколько значений через запятую, если они применимы.
+                    Без лишних вступлений и заключений.
+                    Для каждого пункта выберите наиболее подходящий вариант из предложенных в скобках:
+                    Пол (мужской, женский, гей, лесбиянка)
+                    Возраст пользователя (0-14, 15–24, 25–34, 35–44, 45–54, 55–64, 65+ лет)
+                    Доход (Низкий, Средний, Высокий, Сверхвысокий)
+                    Вероисповедание (Атеизм, Православие, Ислам, Буддизм, Иудаизм, Протестантизм, Католицизм, Старообрядчество, Язычество)
+                    Количество детей (0, 1, 2, 3, больше 3)
+                    Семейное положение (нет, сожительство, брак)
+                    Возраст партнёра/мужа/жены пользователя (нет; 18–24, 25–34, 35–44, 45–54, 55–64, 65+ лет)
+                    Животные (отсутствуют, кошки, собаки, рыбки, птички, подсобное хозяйство)
+                    Профессия (Руководители; Специалисты высшего уровня квалификации; Специалисты среднего уровня квалификации; Служащие; Работники сферы услуг и торговли; Кадры сельского, лесного и рыбного хозяйства; Квалифицированные рабочие; Операторы и водители; Неквалифицированные рабочие)
+                    Месяц дня рождения (январь; февраль; март; апрель; май; июнь; июль; август; сентябрь; октябрь; ноябрь; декабрь)
+                    Месяц дня рождения партнёра/мужа/жены (нет; январь; февраль; март; апрель; май; июнь; июль; август; сентябрь; октябрь; ноябрь; декабрь)
+                    Месяц дня рождения старшего ребёнка (нет; январь; февраль; март; апрель; май; июнь; июль; август; сентябрь; октябрь; ноябрь; декабрь)
+                    Месяц дня рождения младшего ребёнка (нет; январь; февраль; март; апрель; май; июнь; июль; август; сентябрь; октябрь; ноябрь; декабрь)
+                    Пол старшего ребёнка (нет ребёнка, мужской, женский)
+                    Возраст старшего ребёнка (нет ребёнка, 0-1; 1-3; 3-7; 7-11; 11-15; 15-18; больше 18)
+                    Пол младшего ребёнка (нет ребёнка, мужской, женский)
+                    Возраст младшего ребёнка (нет ребёнка, 0-1; 1-3; 3-7; 7-11; 11-15; 15-18; больше 18)
+                    Возраст отца (18–24, 25–34, 35–44, 45–54, 55–64, 65+ лет)
+                    Возраст матери (18–24, 25–34, 35–44, 45–54, 55–64, 65+ лет)
+                    Хобби (из списка: Бег и фитнес; Йога и пилатес; Езда на велосипеде; Туризм, хайкинг и альпинизм; Танцы; Командный спорт; Рисование; Фотография и видеография; Рукоделие; Лепка; Музыка; Писательство; Чтение; Настольные игры; Изучение языков; Программирование и робототехника; Гейминг; Готовка; Садоводство; Уход за домашними животными; Сделай сам (DIY))
+                    Интересы в видах отдыха (из: пляжный отдых; отдых в отеле «все включено»; SPA-процедуры; термальные источники; морские круизы; речные круизы; пешие походы; трекинг; альпинизм; катание на горных лыжах; сноубординг; рафтинг; дайвинг; серфинг; кайтинг; парапланеризм; прыжки с парашютом; обзорные экскурсии; посещение музеев; осмотр замков; арт-туризм; посещение музыкальных фестивалей; карнавалы; отдых в палатках; кемпинг; глэмпинг; загородный отдых на даче; агротуризм; прогулки по национальным паркам; цифровой детокс; киномарафоны; гастрономические туры; винные дегустации; шоппинг-туры)
+                    Интересы в кино (из: боевик; комедия; драма; триллер; ужасы; фантастика; фэнтези; детектив; приключения; вестерн; мюзикл; биография; исторический фильм; военный фильм; нуар; антиутопия; катастрофа; семейный фильм; криминал; спортивная драма; психологический триллер; слэшер; ромком; трагикомедия; кинокомикс; киберпанк; стимпанк; космическая опера; документальное кино; анимация; аниме)
+                    Интересы в музыке (из: Поп-музыка; синти-поп; k-pop; рок; хард-рок; панк-рок; альтернативный рок; инди-рок; гранж; метал; хэви-метал; дэт-метал; блэк-метал; рэп; хип-хоп; треп; джаз; блюз; ритм-н-блюз (R&B); соул; фанк; классическая музыка; неоклассика; опера; электронная музыка; хаус; техно; транс; дабстеп; драм-н-бейс; эмбиент; чиллаут; синтвейв; регги; ска; кантри; фолк-музыка; этно-музыка; шансон; романс; диско)
+                    Интересы в науке (из: Математика; информатика; искусственный интеллект; теоретическая физика; квантовая физика; органическая химия; неорганическая химия; биохимия; молекулярная биология; генетика; социология; когнитивная психология; клиническая психология; лингвистика; философия; робототехника; нанотехнологии; материаловедение; архитектура)
+                    Заболевания (из: острая респираторная вирусная инфекция (ОРВИ); грипп; гипертоническая болезнь; сахарный диабет 2-го типа; гастрит; остеохондроз; бронхиальная астма; аллергический ринит; атопический дерматит; кариес; цистит; железодефицитная анемия; депрессия; генерализованное тревожное расстройство; мигрень)
+                    Интересы в компьютерных играх (из: шутер от первого лица (FPS); ролевая игра (RPG); японская ролевая игра (JRPG); стратегия в реальном времени (RTS); пошаговая стратегия (TBS); многопользовательская онлайн-игра (MMORPG); экшен-adventure; платформер; метроидвания; симулятор выживания (Survival); королевская битва (Battle Royale); рогалик (Roguelike); градостроительный симулятор; симулятор жизни; автосимулятор; авиасимулятор; спортивный симулятор; файтинг; слэшер; головоломка; хоррор; песочница (Sandbox))
+                """.trimIndent()
+            }
+            "product_assumptions" -> {
+                """
+                    Вы - профессиональный прогнозист интереса к покупкам. На основе следующих входных данных:
+                    $contextBlock
+                    
+                    Пожалуйста, предположите только конкретные товары (конкретные наименования), которые будут наиболее интересны этому пользователю для просмотра, добавления в избранное или покупки.
+                    Виды товаров, группы товаров или любые категории генерировать КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО. Выведите только конкретные товары.
+                    Отвечайте на РУССКОМ языке, четко структурируйте ответ в виде списка строк, начинающихся с дефиса (-). Каждая строка должна содержать только одно конкретное наименование товара.
+                """.trimIndent()
+            }
+            "qa" -> {
+                """
+                    Вы - интеллектуальный ассистент, анализирующий контекст пользователя. На основе следующих входных данных:
+                    $contextBlock
+                    
+                    Пожалуйста, подробно ответьте на следующий вопрос пользователя о нем или о товарах. 
+                    Отвечайте на РУССКОМ языке, будьте точны, полезны и кратки. Без лишних вступлений и заключений.
+                    
+                    Вопрос: $extraInput
+                """.trimIndent()
+            }
+            else -> ""
+        }
+        
+        try {
+            onStatusUpdate("Запуск локальной генерации на NPU (Попытка $attempt)...")
+            val result = generateContentWithRetry(generativeModel, prompt, onStatusUpdate)
+            if (result.isNotBlank()) {
+                return result.trim()
+            }
+        } catch (e: Exception) {
+            val errorStr = e.toString()
+            if (errorStr.contains("Input text length exceeds") || errorStr.contains("INFERENCE_ERROR") || errorStr.contains("COMPUTE_ERROR") || errorStr.contains("ErrorCode 5")) {
+                if (attempt == 1) {
+                    onStatusUpdate("Локальный лимит превышен. Переключаемся на агрессивную фильтрацию и суммаризацию полей...")
+                    useSummarization = true
+                } else if (attempt == 2) {
+                    onStatusUpdate("Превышен лимит даже после суммаризации. Применяем максимальное усечение...")
+                    currentIdentity = truncateWordsToLast(currentIdentity, 20)
+                    currentHistory = truncateWordsToLast(currentHistory, 20)
+                    currentContext = truncateWordsToLast(currentContext, 15)
+                    currentViewed = truncateWordsToLast(currentViewed, 15)
+                    currentFavorited = truncateWordsToLast(currentFavorited, 15)
+                    currentActions = truncateWordsToLast(currentActions, 20)
+                    currentRagContext = ""
+                } else {
+                    throw e
+                }
+            } else {
+                throw e
+            }
+        }
+    }
+    
+    throw Exception("Не удалось сгенерировать ответ на Gemini Nano")
+}
