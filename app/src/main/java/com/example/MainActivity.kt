@@ -2619,14 +2619,11 @@ fun MainScreen() {
                                 compareCountText = newValue
                             }
                         },
-                        label = {
-                            Text(
-                                text = "Количество элементов",
-                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp)
-                            )
-                        },
                         placeholder = {
-                            Text(text = "3")
+                            Text(
+                                text = "Кол-во (напр. 3)",
+                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp, color = SleekOnBackground.copy(alpha = 0.5f))
+                            )
                         },
                         modifier = Modifier
                             .weight(1f)
