@@ -1,21 +1,29 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+.apk и примеры файлов https://disk.yandex.ru/d/U7VMzj6EdojaaQ
 
-# Run and deploy your AI Studio app
+При первой попытке запуска, смарфон может докачивать стандартную Gemini Nano, 3,6 ГБ. 
 
-This contains everything you need to run your app locally.
+Смартфон должен быть в списке поддерживающие Gemini Nano в режиме запросов [списке](https://developers.google.com/ml-kit/genai?hl=ru#prompt-device) 
 
-View your app in AI Studio: https://ai.studio/apps/83ff3b39-f18e-45bb-b15a-6783baf73a05
+Идея приложения - показать, что 
+1) при помощи локальной LLM на устройстве можно переранжировать или генерировать разные результаты
+2) можно вообще ни одной строчки не писать вручную, только вайбкодинг Google AI Studio
 
-## Run Locally
+Соответственно, копируешь или загружаешь в соотв. поля файлы:
+items_to_rank - товары (сейчас то, что выдавалось мне в рекомендациях в прошлое воскресенье)
+user_identity - то, что известно о пользователе (сейчас - то, что было известно обо мне в прошлом июле)
+external_context - то, что мы знаем об окружении (погода, время года и т.д.)
+favorited_items - то, что у меня в избранном
+viewed_items - просмотры товаров
 
-**Prerequisites:**  [Android Studio](https://developer.android.com/studio)
+user_actions - тоже можно загрузить или вставить, но идея в том, что они накапливаются сами, при щелчках по выдаче
 
+Также можно загрузить в соотв. поля
+rag - доп инфо о том, что интересно пользователям по регионам, праздникам и т.д. сейчас там немного правдоподобной синтетики
+fine-tuned adapter - можно загрузить LoRA-адаптер, например, adapter_model.safetensors, но он там сейчас dummy, обучен на небольшой синтетике без какого-то осмысленного улучшения качества, просто чтобы не сломать
 
-1. Open Android Studio
-2. Select **Open** and choose the directory containing this project
-3. Allow Android Studio to fix any incompatibilities as it imports the project.
-4. Create a file named `.env` in the project directory and set `GEMINI_API_KEY` in that file to your Gemini API key (see `.env.example` for an example)
-5. Remove this line from the app's `build.gradle.kts` file: `signingConfig = signingConfigs.getByName("debugConfig")`
-6. Run the app on an emulator or physical device
+Дальше нажимаешь 
+"user assumptions" - и оно генерирует некоторые предположения о характеристиках пользователя, 
+"product assumptions" - о продуктах, интересных пользователю, 
+"rank catalog" - оно переранжирует то, что ты загрузил в items_to_rank.
+
+Ни одной строчки внутренних данных или кода какой-либо компании не использовано, marketplace и даже domain agnostic. 
