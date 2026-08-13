@@ -38,7 +38,7 @@
 Ни одной строчки внутренних данных или кода какой-либо компании не использовано, marketplace и даже domain agnostic, пробовать переранжировать можно товары, банковские продукты, документы, даже элементы управления. 
 
 
-![загрузка данных 1](https://github.com/asidorov83/slm-reranker/blob/main/docs/img/readme-1.jpg "загрузка данных 1") ![загрузка данных 2 и запуск переранжирования](https://github.com/asidorov83/slm-reranker/blob/main/docs/img/readme-2.jpg "загрузка данных 2 и запуск переранжирования") ![самооценка результатов переранжирования](https://github.com/asidorov83/slm-reranker/blob/main/docs/img/readme-2.jpg "самооценка результатов переранжирования")
+![скриншоты приложения](https://github.com/asidorov83/slm-reranker/blob/main/docs/img/readme-4.jpg "скриншоты приложения")
 
 TODO:
 a) добавить режим переранжирования классическими моделями и трансформерами
